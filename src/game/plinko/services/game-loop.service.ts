@@ -1,49 +1,53 @@
 import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import appConfig from '../../../config/app.config';
+import appConfig from 'src/config/app.config';
 import type { ConfigType } from '@nestjs/config';
-import { EventsGateway } from '../../../events/events.gateway';
+import { EventsGateway } from 'src/events/events.gateway';
 import { PlinkoPriceService } from './price.service';
-import { RedisService } from '../../../redis/redis.service';
+import { PlinkoEngineService } from './plinko-engine';
+import { RedisService } from 'src/redis/redis.service';
 import { HttpService } from 'src/http/http.service';
-import { getPlinkoStateKey, getPlinkoRoundBetsKey } from '../../../redis/redis.keys';
+import { PlinkoPayoutService } from './plinko-payout';
+import { getPlinkoStateKey, getPlinkoRoundBetsKey } from 'src/redis/redis.keys';
 import { v4 as uuidv4 } from 'uuid';
-
-export enum GamePhase {
-    BETTING = 'BETTING',       // 10s
-    ACCUMULATION = 'LOCKED',   // 5s
-    DROPPING = 'DROPPING',     // 10s
-    PAUSED = 'PAUSED'          // Circuit Breaker
-}
+import { GamePhase, PlinkoGlobalState, StockState } from './../dto/game-state';
 
 @Injectable()
 export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
     private readonly logger = new Logger(PlinkoGameLoopService.name);
     private loops: Map<string, NodeJS.Timeout> = new Map();
     private active = false;
+    private readonly TIMINGS: Record<string, number>;
 
     constructor(
         private readonly priceService: PlinkoPriceService,
+        private readonly engineService: PlinkoEngineService,
         private readonly redisService: RedisService,
         private readonly eventsGateway: EventsGateway,
         private readonly httpService: HttpService,
+        private readonly payoutService: PlinkoPayoutService,
         @Inject(appConfig.KEY) private readonly config: ConfigType<typeof appConfig>,
-    ) { }
+    ) {
+        this.TIMINGS = {
+            [GamePhase.BETTING]: this.config.plinko.bettingTime,
+            [GamePhase.ACCUMULATION]: this.config.plinko.accumulationTime,
+            [GamePhase.DROPPING]: this.config.plinko.droppingTime,
+            [GamePhase.PAYOUT]: this.config.plinko.payoutTime,
+        };
+    }
 
     onModuleInit() {
         this.active = true;
         this.logger.log('Starting Plinko Game Loops...');
-        const markets = this.config.subscribeChannels;
-        markets.forEach(market => this.runGameLoop(market));
+        this.config.subscribeChannels.forEach(market => this.runGameLoop(market));
     }
 
     onModuleDestroy() {
         this.active = false;
-        this.loops.forEach(timeout => clearTimeout(timeout));
+        this.loops.forEach(t => clearTimeout(t));
     }
 
     /**
-     * The Main Recursive Loop
-     * This replaces your setInterval to prevent drift and overlapping executions.
+     * Main Loop: Checks Health FIRST, then processes Game Logic.
      */
     private async runGameLoop(market: string) {
         if (!this.active) return;
@@ -51,6 +55,7 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
         try {
             const isHealthy = await this.checkMarketHealth(market);
             if (!isHealthy) {
+                // If unhealthy, retry in 2s, do not process tick
                 this.scheduleNext(market, 2000, () => this.runGameLoop(market));
                 return;
             }
@@ -58,18 +63,18 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
             await this.processGameTick(market);
 
         } catch (error) {
-            this.logger.error(`Critical Error in Game Loop (${market}): ${error.message}`, error.stack);
+            this.logger.error(`Critical Loop Error (${market}): ${error.message}`, error.stack);
             this.scheduleNext(market, 5000, () => this.runGameLoop(market));
         }
     }
 
     /**
-     * Checks data freshness. Pauses game if stale.
-     * Returns TRUE if healthy, FALSE if paused.
+     * Circuit Breaker: Pauses game and refunds bets if data is stale.
      */
     private async checkMarketHealth(market: string): Promise<boolean> {
         const snapshot = await this.priceService.getMarketSnapshot(market);
 
+        // Check freshness (e.g. 5 seconds tolerance)
         const isFresh = snapshot && this.priceService.isSnapshotFresh(snapshot, 5);
 
         if (!isFresh) {
@@ -77,8 +82,10 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
             const rawState = await this.redisService.get(stateKey);
             const state = rawState ? JSON.parse(rawState) : {};
 
+            // If we are not already paused, trigger emergency stop
             if (state.phase !== GamePhase.PAUSED) {
                 this.logger.warn(`[Circuit Breaker] Market ${market} stale. Triggering Emergency Stop.`);
+
                 await this.handleEmergencyClose(market);
 
                 await this.redisService.set(stateKey, JSON.stringify({
@@ -99,6 +106,7 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
         if (state.phase === GamePhase.PAUSED) {
             this.logger.log(`[Circuit Breaker] Market ${market} recovered. Resuming.`);
             this.eventsGateway.broadcastMarketStatus(market, 'OPEN');
+
             await this.startBettingPhase(market);
             return false;
         }
@@ -107,30 +115,34 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
     }
 
     /**
-     * Determines what to do based on current Redis state
+     * 4-Phase State Machine
+     * Now using PlinkoGlobalState to pass data smoothly between phases.
      */
     private async processGameTick(market: string) {
         const stateKey = getPlinkoStateKey(market);
         const rawState = await this.redisService.get(stateKey);
 
         if (!rawState) {
-            await this.startBettingPhase(market);
+            await this.startBettingPhase(market); // Boot up
             return;
         }
 
-        const state = JSON.parse(rawState);
+        const state = JSON.parse(rawState) as PlinkoGlobalState;
         const now = Date.now();
         const timeLeft = state.endTime - now;
 
         if (timeLeft <= 0) {
             switch (state.phase) {
                 case GamePhase.BETTING:
-                    await this.startAccumulationPhase(market, state.roundId);
+                    await this.startAccumulationPhase(market, state.roundId, state.stocks);
                     break;
                 case GamePhase.ACCUMULATION:
-                    await this.startDroppingPhase(market, state.roundId);
+                    await this.startDroppingPhase(market, state.roundId, state.stocks);
                     break;
                 case GamePhase.DROPPING:
+                    await this.startPayoutPhase(market, state.roundId, state.stocks);
+                    break;
+                case GamePhase.PAYOUT:
                     await this.startBettingPhase(market);
                     break;
                 default:
@@ -142,60 +154,159 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
         }
     }
 
-
     private async startBettingPhase(market: string) {
         const roundId = uuidv4();
-        const duration = 10000;
-
-        const state = {
-            phase: GamePhase.BETTING,
-            roundId,
-            startTime: Date.now(),
-            endTime: Date.now() + duration,
-        };
-
-        await this.redisService.set(getPlinkoStateKey(market), JSON.stringify(state));
-        this.eventsGateway.server.to(market).emit('game:phase', state);
-
-        this.scheduleNext(market, duration, () => this.runGameLoop(market));
-    }
-
-    private async startAccumulationPhase(market: string, roundId: string) {
-        const duration = 5000;
+        const duration = this.TIMINGS[GamePhase.BETTING];
 
         const snapshot = await this.priceService.getMarketSnapshot(market);
-        await this.redisService.set(`plinko:${market}:${roundId}:start_price`, JSON.stringify(snapshot), 600);
 
-        const state = {
+        if (!snapshot) {
+            this.logger.warn(`[Game Loop] No snapshot for ${market} in Betting. Retrying.`);
+            this.scheduleNext(market, 1000, () => this.runGameLoop(market));
+            return;
+        }
+
+        const stockNames = this.engineService.selectGameStocks(snapshot);
+
+        const stocks: StockState[] = stockNames.map(symbol => ({
+            symbol,
+            currentPrice: snapshot.symbols[symbol]?.price || 0
+        }));
+
+        const state: PlinkoGlobalState = {
+            phase: GamePhase.BETTING,
+            roundId,
+            serverTime: Date.now(),
+            endTime: Date.now() + duration,
+            timeLeft: duration,
+            stocks: stocks,
+            canUnbet: true,
+            message: "Place your bets!"
+        };
+
+        await this.saveAndBroadcast(market, state);
+
+        await this.redisService.set(`plinko:${market}:${roundId}:stocks`, JSON.stringify(stockNames), 300);
+
+        this.scheduleNext(market, duration, () => this.runGameLoop(market));
+    }
+
+    private async startAccumulationPhase(market: string, roundId: string, prevStocks: StockState[]) {
+        const duration = this.TIMINGS[GamePhase.ACCUMULATION];
+
+        const snapshot = await this.priceService.getMarketSnapshot(market);
+
+        if (!snapshot) {
+            this.logger.warn(`[Game Loop] No snapshot for ${market} in Accumulation. Retrying.`);
+            this.scheduleNext(market, 1000, () => this.runGameLoop(market));
+            return;
+        }
+
+
+        const updatedStocks = prevStocks.map(s => {
+            const price = snapshot.symbols[s.symbol]?.price || 0;
+            return {
+                ...s,
+                startPrice: price,
+                currentPrice: price,
+                delta: 0
+            };
+        });
+
+        await this.redisService.set(`plinko:${market}:${roundId}:start_snap`, JSON.stringify(snapshot), 300);
+
+        const state: PlinkoGlobalState = {
             phase: GamePhase.ACCUMULATION,
             roundId,
-            startTime: Date.now(),
+            serverTime: Date.now(),
             endTime: Date.now() + duration,
+            timeLeft: duration,
+            stocks: updatedStocks,
+            canUnbet: false,
+            message: "Bets Closed. Tracking Markets..."
         };
 
-        await this.redisService.set(getPlinkoStateKey(market), JSON.stringify(state));
-        this.eventsGateway.server.to(market).emit('game:phase', state);
-
+        await this.saveAndBroadcast(market, state);
         this.scheduleNext(market, duration, () => this.runGameLoop(market));
     }
 
-    private async startDroppingPhase(market: string, roundId: string) {
-        const duration = 10000;
+    private async startDroppingPhase(market: string, roundId: string, prevStocks: StockState[]) {
+        const duration = this.TIMINGS[GamePhase.DROPPING];
 
-        const state = {
+        const endSnapshot = await this.priceService.getMarketSnapshot(market);
+
+        if (!endSnapshot) {
+            this.logger.warn(`[Game Loop] No snapshot for ${market} in Dropping. Retrying.`);
+            this.scheduleNext(market, 1000, () => this.runGameLoop(market));
+            return;
+        }
+
+        const startRaw = await this.redisService.get(`plinko:${market}:${roundId}:start_snap`);
+        const startSnapshot = startRaw ? JSON.parse(startRaw) : endSnapshot;
+
+        const stockNames = prevStocks.map(s => s.symbol);
+
+        const results = this.engineService.calculateRoundResults(stockNames, startSnapshot, endSnapshot);
+
+        const updatedStocks = prevStocks.map(s => {
+            const res = results.find(r => r.stockName === s.symbol);
+            return {
+                ...s,
+                currentPrice: res?.endPrice || 0,
+                delta: res?.deltaPercent || 0,
+                path: res?.path || [],
+                slot: res?.stockPosition || 0,
+                multiplier: res?.multiplier || 0
+            };
+        });
+
+        await this.redisService.set(`plinko:${market}:${roundId}:results`, JSON.stringify(results), 300);
+
+        const state: PlinkoGlobalState = {
             phase: GamePhase.DROPPING,
             roundId,
-            startTime: Date.now(),
+            serverTime: Date.now(),
             endTime: Date.now() + duration,
+            timeLeft: duration,
+            stocks: updatedStocks,
+            canUnbet: false,
+            message: "Dropping!"
         };
 
-        await this.redisService.set(getPlinkoStateKey(market), JSON.stringify(state));
-        this.eventsGateway.server.to(market).emit('game:phase', state);
+        await this.saveAndBroadcast(market, state);
+        this.scheduleNext(market, duration, () => this.runGameLoop(market));
+    }
+
+    private async startPayoutPhase(market: string, roundId: string, prevStocks: StockState[]) {
+        const duration = this.TIMINGS[GamePhase.PAYOUT];
+
+        const state: PlinkoGlobalState = {
+            phase: GamePhase.PAYOUT,
+            roundId,
+            serverTime: Date.now(),
+            endTime: Date.now() + duration,
+            timeLeft: duration,
+            stocks: prevStocks,
+            canUnbet: false,
+            message: "Paying Winners..."
+        };
+
+        await this.saveAndBroadcast(market, state);
+
+        this.payoutService.processRoundPayouts(market, roundId).catch(err =>
+            this.logger.error(`Payout Error: ${err.message}`)
+        );
 
         this.scheduleNext(market, duration, () => this.runGameLoop(market));
     }
 
+    private async saveAndBroadcast(market: string, state: PlinkoGlobalState) {
+        await this.redisService.set(getPlinkoStateKey(market), JSON.stringify(state));
 
+        this.eventsGateway.server.to(market).emit('game:state', state);
+    }
+
+    // --- EMERGENCY / REFUND LOGIC (Preserved from your code) ---
 
     private async handleEmergencyClose(market: string) {
         const stateKey = getPlinkoStateKey(market);
@@ -204,6 +315,7 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
 
         const state = JSON.parse(rawState);
 
+        // Only refund if bets were active (Betting or Accumulation phase)
         if (state.phase === GamePhase.BETTING || state.phase === GamePhase.ACCUMULATION) {
             this.logger.warn(`[Emergency] Cancelling Round ${state.roundId} on ${market}. Refunding bets.`);
 
@@ -244,9 +356,8 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
         await this.redisService.del(betsKey);
     }
 
-    private scheduleNext(market: string, delay: number, callback: () => void) {
+    private scheduleNext(market: string, delay: number, cb: () => void) {
         if (this.loops.has(market)) clearTimeout(this.loops.get(market));
-        const timeout = setTimeout(callback, delay);
-        this.loops.set(market, timeout);
+        this.loops.set(market, setTimeout(cb, delay));
     }
 }
