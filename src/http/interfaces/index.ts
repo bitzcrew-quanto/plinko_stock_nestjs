@@ -5,6 +5,7 @@ export interface HqBetRequest {
     transactionId: string;
     playerId?: string;
     tenantId?: string;
+    metadata?: any;
 }
 
 export interface HqBetResponse {

@@ -10,6 +10,9 @@ import { PlinkoPayoutService } from './plinko-payout';
 import { getPlinkoStateKey, getPlinkoRoundBetsKey } from 'src/redis/redis.keys';
 import { v4 as uuidv4 } from 'uuid';
 import { GamePhase, PlinkoGlobalState, StockState } from './../dto/game-state';
+import * as os from 'os';
+
+
 
 @Injectable()
 export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
@@ -17,6 +20,8 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
     private loops: Map<string, NodeJS.Timeout> = new Map();
     private active = false;
     private readonly TIMINGS: Record<string, number>;
+
+    private readonly instanceId = os.hostname() + '-' + uuidv4();
 
     constructor(
         private readonly priceService: PlinkoPriceService,
@@ -37,7 +42,7 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
 
     onModuleInit() {
         this.active = true;
-        this.logger.log('Starting Plinko Game Loops...');
+        this.logger.log(`Starting Plinko Game Loops (Instance: ${this.instanceId})...`);
         this.config.subscribeChannels.forEach(market => this.runGameLoop(market));
     }
 
@@ -47,15 +52,24 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
     }
 
     /**
-     * Main Loop: Checks Health FIRST, then processes Game Logic.
+     * Main Loop with LEADER ELECTION.
+     * Prevents duplicate game loops when scaling horizontally.
      */
     private async runGameLoop(market: string) {
         if (!this.active) return;
 
+        const lockKey = `lock:gameloop:${market}`;
+        const isLeader = await this.acquireOrExtendLock(lockKey, this.instanceId, 10000);
+
+        if (!isLeader) {
+
+            this.scheduleNext(market, 5000, () => this.runGameLoop(market));
+            return;
+        }
+
         try {
             const isHealthy = await this.checkMarketHealth(market);
             if (!isHealthy) {
-                // If unhealthy, retry in 2s, do not process tick
                 this.scheduleNext(market, 2000, () => this.runGameLoop(market));
                 return;
             }
@@ -69,12 +83,47 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
     }
 
     /**
+     * Atomic Leader Election Script (Lua)
+     * - Returns true if lock acquired or extended.
+     * - Returns false if locked by another instance.
+     */
+    private async acquireOrExtendLock(key: string, value: string, ttlMs: number): Promise<boolean> {
+        const client = this.redisService.getStateClient();
+
+        // Lua script:
+        // If key == my_value OR key does not exist:
+        //    Set key = my_value with TTL
+        //    Return 1 (Success)
+        // Else:
+        //    Return 0 (Failed)
+        const script = `
+            if redis.call("get", KEYS[1]) == ARGV[1] then
+                return redis.call("pexpire", KEYS[1], ARGV[2])
+            elseif redis.call("set", KEYS[1], ARGV[1], "NX", "PX", ARGV[2]) then
+                return 1
+            else
+                return 0
+            end
+        `;
+
+        try {
+            const result = await client.eval(script, {
+                keys: [key],
+                arguments: [value, String(ttlMs)]
+            });
+            return result === 1 || result === 'OK';
+        } catch (e) {
+            this.logger.warn(`Redis Lock Error: ${e.message}`);
+            return false;
+        }
+    }
+
+    /**
      * Circuit Breaker: Pauses game and refunds bets if data is stale.
      */
     private async checkMarketHealth(market: string): Promise<boolean> {
         const snapshot = await this.priceService.getMarketSnapshot(market);
 
-        // Check freshness (e.g. 5 seconds tolerance)
         const isFresh = snapshot && this.priceService.isSnapshotFresh(snapshot, 5);
 
         if (!isFresh) {
@@ -82,7 +131,6 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
             const rawState = await this.redisService.get(stateKey);
             const state = rawState ? JSON.parse(rawState) : {};
 
-            // If we are not already paused, trigger emergency stop
             if (state.phase !== GamePhase.PAUSED) {
                 this.logger.warn(`[Circuit Breaker] Market ${market} stale. Triggering Emergency Stop.`);
 
@@ -116,7 +164,6 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
 
     /**
      * 4-Phase State Machine
-     * Now using PlinkoGlobalState to pass data smoothly between phases.
      */
     private async processGameTick(market: string) {
         const stateKey = getPlinkoStateKey(market);
@@ -178,7 +225,6 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
             roundId,
             serverTime: Date.now(),
             endTime: Date.now() + duration,
-            timeLeft: duration,
             stocks: stocks,
             canUnbet: true,
             message: "Place your bets!"
@@ -202,7 +248,6 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
             return;
         }
 
-
         const updatedStocks = prevStocks.map(s => {
             const price = snapshot.symbols[s.symbol]?.price || 0;
             return {
@@ -220,7 +265,6 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
             roundId,
             serverTime: Date.now(),
             endTime: Date.now() + duration,
-            timeLeft: duration,
             stocks: updatedStocks,
             canUnbet: false,
             message: "Bets Closed. Tracking Markets..."
@@ -267,7 +311,6 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
             roundId,
             serverTime: Date.now(),
             endTime: Date.now() + duration,
-            timeLeft: duration,
             stocks: updatedStocks,
             canUnbet: false,
             message: "Dropping!"
@@ -285,7 +328,6 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
             roundId,
             serverTime: Date.now(),
             endTime: Date.now() + duration,
-            timeLeft: duration,
             stocks: prevStocks,
             canUnbet: false,
             message: "Paying Winners..."
@@ -302,11 +344,10 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
 
     private async saveAndBroadcast(market: string, state: PlinkoGlobalState) {
         await this.redisService.set(getPlinkoStateKey(market), JSON.stringify(state));
-
         this.eventsGateway.server.to(market).emit('game:state', state);
     }
 
-    // --- EMERGENCY / REFUND LOGIC (Preserved from your code) ---
+    // --- EMERGENCY / REFUND LOGIC ---
 
     private async handleEmergencyClose(market: string) {
         const stateKey = getPlinkoStateKey(market);
@@ -338,16 +379,26 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
 
         for (const [playerId, betJson] of Object.entries(allBets)) {
             try {
-                const bet = JSON.parse(betJson);
+                let userBets: any[] = [];
+                try {
+                    userBets = JSON.parse(betJson);
+                } catch {
+                    userBets = [JSON.parse(betJson)];
+                }
 
-                await this.httpService.creditWin({
-                    sessionToken: bet.sessionToken,
-                    winAmount: bet.amount,
-                    currency: 'USD',
-                    transactionId: uuidv4(),
-                    type: 'refund',
-                    metadata: { reason: 'market_outage', originalRound: roundId }
-                });
+                if (!Array.isArray(userBets)) userBets = [userBets];
+
+                for (const bet of userBets) {
+                    await this.httpService.creditWin({
+                        sessionToken: bet.sessionToken,
+                        winAmount: bet.amount,
+                        currency: 'USD',
+                        transactionId: uuidv4(),
+                        type: 'refund',
+                        metadata: { reason: 'market_outage', originalRound: roundId, originalBetId: bet.transactionId }
+                    });
+                }
+
             } catch (err) {
                 this.logger.error(`Failed to refund player ${playerId}: ${err.message}`);
             }

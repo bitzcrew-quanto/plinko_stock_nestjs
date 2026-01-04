@@ -22,12 +22,7 @@ export interface PlinkoGlobalState {
     roundId: string;
     serverTime: number; 
     endTime: number;     
-    timeLeft: number;    
-
     stocks: StockState[]; 
-
     canUnbet: boolean;
     message?: string;   
-    
-    results?: any; 
 }

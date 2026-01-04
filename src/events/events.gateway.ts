@@ -11,7 +11,7 @@ import type { AuthenticatedSocket } from 'src/common/types/socket.types';
 import { RedisService } from 'src/redis/redis.service';
 import { BalanceUpdateService } from 'src/redis/balance-update.service';
 import { MarketStatusService } from 'src/markets/market-status.service';
-import { getKeyForPlayerSession, getKeyForLastMarketSnapshot } from 'src/redis/redis.keys';
+import { getKeyForPlayerSession, getKeyForLastMarketSnapshot, getPlinkoStateKey, getPlinkoRoundBetsKey } from 'src/redis/redis.keys';
 
 @WebSocketGateway({
     cors: {
@@ -39,7 +39,6 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
             if (!token) {
                 this.logger.warn(`Connection rejected: No token provided by socket ${client.id}`);
-                // Inform frontend before disconnecting
                 try {
                     client.emit('error', {
                         type: 'auth',
@@ -73,10 +72,8 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
             client.emit('updated_balance', { playerUpdatedBalance: parseFloat(client.session.currentBalance), currency: client.session.currency });
 
-            // Join market data room directly
             const roomToJoin = client.session.room;
 
-            // Check if market is open
             const isOpen = this.marketStatus.isMarketOpen(roomToJoin);
             if (!isOpen) {
                 this.logger.warn(`Connection rejected: Market ${roomToJoin} is closed for socket ${client.id}`);
@@ -126,7 +123,6 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
                             JSON.stringify(currentSession)
                         );
                     } else {
-                        // The session has expired or was removed from Redis.
                         this.logger.warn(`Session ${sessionKey} expired during heartbeat check. Disconnecting client ${client.id}.`);
                         client.disconnect(true);
                     }
@@ -135,12 +131,34 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
                 }
             };
 
-            // Piggyback on the engine.io's heartbeat mechanism
             client.conn.on('heartbeat', updateSessionTimestamp);
 
             this.logger.log(`Client connected: ${client.id}, PlayerID: ${client.session.tenantPlayerId}, Tenant: ${tenantId}, Market Room: ${roomToJoin}, Balance Room: ${playerBalanceRoom}`);
 
-            // TODO: Restore Active Game State logic if applicable to Plinko
+            try {
+                const stateKey = getPlinkoStateKey(roomToJoin);
+                const rawState = await this.redisService.get(stateKey);
+
+                if (rawState) {
+                    const state = JSON.parse(rawState);
+                    
+                    client.emit('game:state', state);
+
+                    if (state.roundId) {
+                        const roundBetsKey = getPlinkoRoundBetsKey(roomToJoin, state.roundId);
+                        
+                        const userBetJson = await this.redisService.getStateClient().hGet(roundBetsKey, playerId);
+                        
+                        if (userBetJson) {
+                            const userBet = JSON.parse(userBetJson);
+                            client.emit('game:user_bets', [userBet]); 
+                            this.logger.debug(`Restored bet for player ${playerId} in round ${state.roundId}`);
+                        }
+                    }
+                }
+            } catch (error) {
+                this.logger.error(`Error restoring state for player ${playerId}: ${error.message}`);
+            }
 
         } catch (err) {
             this.logger.error('Error during handleConnection authentication:', (err).message);
@@ -185,7 +203,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
             const size = this.server.sockets.adapter.rooms.get(room)?.size ?? 0;
             return size > 0;
         } catch {
-            return true; // default to broadcasting if unsure
+            return true; 
         }
     }
 
