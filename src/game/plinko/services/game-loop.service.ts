@@ -13,7 +13,6 @@ import { GamePhase, PlinkoGlobalState, StockState } from './../dto/game-state';
 import * as os from 'os';
 
 
-
 @Injectable()
 export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
     private readonly logger = new Logger(PlinkoGameLoopService.name);
@@ -298,8 +297,7 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
                 ...s,
                 currentPrice: res?.endPrice || 0,
                 delta: res?.deltaPercent || 0,
-                path: res?.path || [],
-                slot: res?.stockPosition || 0,
+                multiplierIndex: res?.multiplierIndex,
                 multiplier: res?.multiplier || 0
             };
         });

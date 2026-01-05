@@ -6,8 +6,9 @@ import { HttpModule } from 'src/http/http.module';
 import { PlinkoPriceService } from './services/price.service';
 import { PlinkoEngineService } from './services/plinko-engine';
 import { PlinkoGameLoopService } from './services/game-loop.service';
-import { PlinkoBetService } from './services/plinko-bet';    
+import { PlinkoBetService } from './services/plinko-bet';
 import { PlinkoPayoutService } from './services/plinko-payout';
+import { PlinkoGateway } from './plinko.gateway';
 
 @Module({
     imports: [
@@ -17,16 +18,17 @@ import { PlinkoPayoutService } from './services/plinko-payout';
         HttpModule,
     ],
     providers: [
-        PlinkoPriceService,   
-        PlinkoEngineService,  
+        PlinkoPriceService,
+        PlinkoEngineService,
         PlinkoGameLoopService,
-        PlinkoBetService,      
-        PlinkoPayoutService    
+        PlinkoBetService,
+        PlinkoPayoutService,
+        PlinkoGateway
     ],
     exports: [
         PlinkoPriceService,
         PlinkoEngineService,
-        PlinkoBetService        
+        PlinkoBetService
     ],
 })
 export class PlinkoModule { }

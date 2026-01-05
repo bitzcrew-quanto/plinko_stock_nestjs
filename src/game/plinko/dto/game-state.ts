@@ -8,21 +8,22 @@ export enum GamePhase {
 
 export interface StockState {
     symbol: string;
-    name?: string;       
-    startPrice?: number; 
-    currentPrice?: number; 
-    delta?: number;      
-    path?: number[];     
-    slot?: number;       
-    multiplier?: number; 
+    name?: string;
+    startPrice?: number;
+    currentPrice?: number;
+    delta?: number;
+    path?: number[];
+    slot?: number;
+    multiplierIndex?: number;
+    multiplier?: number;
 }
 
 export interface PlinkoGlobalState {
     phase: GamePhase;
     roundId: string;
-    serverTime: number; 
-    endTime: number;     
-    stocks: StockState[]; 
+    serverTime: number;
+    endTime: number;
+    stocks: StockState[];
     canUnbet: boolean;
-    message?: string;   
+    message?: string;
 }
