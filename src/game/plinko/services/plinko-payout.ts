@@ -89,14 +89,17 @@ export class PlinkoPayoutService {
                 if (tenantId) {
                     const room = this.balanceService.getPlayerBalanceRoom(tenantId, playerId);
 
-                    this.events.server.to(room).emit('game:payout', {
+                    const payload = {
                         roundId,
                         currency,
                         totalWager: Number(totalWager.toFixed(2)),
                         totalPayout: Number(totalPayout.toFixed(2)),
                         netProfit: Number((totalPayout - totalWager).toFixed(2)),
                         bets: betBreakdowns
-                    });
+                    };
+
+                    this.logger.log(`[Payout] Emitting to room: ${room} | Player: ${playerId} | Win: ${totalPayout}`);
+                    this.events.server.to(room).emit('game:payout', payload);
                 } else {
                     this.logger.warn(`Missing tenantId for player ${playerId}, cannot emit win popup.`);
                 }

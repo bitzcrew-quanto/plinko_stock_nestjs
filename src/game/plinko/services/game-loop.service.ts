@@ -195,6 +195,12 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
                     await this.startBettingPhase(market);
             }
         } else {
+            // Update server time and broadcast to keep clients synced
+            state.serverTime = now;
+            // Note: We don't save to Redis every tick to save IO, just broadcast.
+            // But to be safe for failover, we could. For now, just emit.
+            this.eventsGateway.server.to(market).emit('game:state', state);
+
             const nextTick = Math.min(timeLeft, 1000);
             this.scheduleNext(market, nextTick, () => this.runGameLoop(market));
         }
@@ -233,7 +239,8 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
 
         await this.redisService.set(`plinko:${market}:${roundId}:stocks`, JSON.stringify(stockNames), 300);
 
-        this.scheduleNext(market, duration, () => this.runGameLoop(market));
+        // Schedule next tick in 1s to update timer
+        this.scheduleNext(market, 1000, () => this.runGameLoop(market));
     }
 
     private async startAccumulationPhase(market: string, roundId: string, prevStocks: StockState[]) {
@@ -270,7 +277,7 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
         };
 
         await this.saveAndBroadcast(market, state);
-        this.scheduleNext(market, duration, () => this.runGameLoop(market));
+        this.scheduleNext(market, 1000, () => this.runGameLoop(market));
     }
 
     private async startDroppingPhase(market: string, roundId: string, prevStocks: StockState[]) {
@@ -315,7 +322,7 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
         };
 
         await this.saveAndBroadcast(market, state);
-        this.scheduleNext(market, duration, () => this.runGameLoop(market));
+        this.scheduleNext(market, 1000, () => this.runGameLoop(market));
     }
 
     private async startPayoutPhase(market: string, roundId: string, prevStocks: StockState[]) {
@@ -337,7 +344,7 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
             this.logger.error(`Payout Error: ${err.message}`)
         );
 
-        this.scheduleNext(market, duration, () => this.runGameLoop(market));
+        this.scheduleNext(market, 1000, () => this.runGameLoop(market));
     }
 
     private async saveAndBroadcast(market: string, state: PlinkoGlobalState) {

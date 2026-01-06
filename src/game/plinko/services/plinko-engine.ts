@@ -8,8 +8,8 @@ export interface PlinkoResult {
     startPrice: number;
     endPrice: number;
     deltaPercent: number;
-    multiplierIndex: number; 
-    multiplier: number;     
+    multiplierIndex: number;
+    multiplier: number;
 }
 
 @Injectable()
@@ -76,7 +76,7 @@ export class PlinkoEngineService {
         // Sensitivity: How much % change moves the ball 1 slot?
         // e.g., 0.15 means 0.15% change shifts 1 slot.
         // Adjust this if you want the game to be more/less volatile to price changes.
-        const sensitivity = 0.15;
+        const sensitivity = 0.02;
 
         const center = (totalBins - 1) / 2;
 

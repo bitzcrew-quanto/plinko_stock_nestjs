@@ -13,12 +13,12 @@ export class PlinkoBetService {
     constructor(
         private readonly redis: RedisService,
         private readonly http: HttpService
-    ) {}
+    ) { }
 
     async placeBet(client: AuthenticatedSocket, amount: number, stocks: string[]) {
         const market = client.session.room;
         const playerId = client.session.tenantPlayerId;
-        const tenantId = client.session.tenantPublicId; 
+        const tenantId = client.session.tenantPublicId;
 
         const stateRaw = await this.redis.get(getPlinkoStateKey(market));
         const state = stateRaw ? JSON.parse(stateRaw) : null;
@@ -33,14 +33,14 @@ export class PlinkoBetService {
         // B. WALLET DEDUCTION
         const transactionId = uuidv4();
         let deduction;
-        
+
         try {
             deduction = await this.http.placeBet({
                 sessionToken: client.session.sessionToken,
                 betAmount: amount,
                 currency: client.session.currency,
                 transactionId,
-                metadata: { game: 'plinko', roundId: state.roundId, stocks, tenantId } 
+                metadata: { game: 'plinko', roundId: state.roundId, stocks, tenantId }
             });
         } catch (e) {
             throw new BadRequestException('Wallet deduction failed');
@@ -52,10 +52,10 @@ export class PlinkoBetService {
 
         const roundId = state.roundId;
         const betKey = getPlinkoRoundBetsKey(market, roundId);
-        
+
         const newBet = {
             playerId,
-            tenantId, 
+            tenantId,
             amount,
             stocks,
             transactionId,
@@ -84,7 +84,7 @@ export class PlinkoBetService {
             status: 'ACCEPTED',
             newBalance: deduction.data.newBalance,
             roundId,
-            transactionId 
+            transactionId
         };
     }
 
@@ -138,11 +138,11 @@ export class PlinkoBetService {
         });
 
         if (!removedBetString) {
-             throw new BadRequestException('Bet not found or already cancelled.');
+            throw new BadRequestException('Bet not found or already cancelled.');
         }
 
         const bet = JSON.parse(removedBetString as string);
-        
+
         try {
             const refundTx = await this.http.creditWin({
                 sessionToken: client.session.sessionToken,
@@ -153,10 +153,10 @@ export class PlinkoBetService {
                 metadata: { reason: 'user_cancel', originalBetId: transactionId }
             });
 
-            return { 
-                status: 'CANCELLED', 
-                refundAmount: bet.amount, 
-                newBalance: refundTx.data.newBalance 
+            return {
+                status: 'CANCELLED',
+                refundAmount: bet.amount,
+                newBalance: refundTx.data.newBalance
             };
         } catch (e) {
             this.logger.error(`CRITICAL: Refund failed for ${playerId}, bet ${transactionId}`);

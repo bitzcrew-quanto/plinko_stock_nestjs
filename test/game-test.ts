@@ -172,7 +172,9 @@ function handleGameState(socket: Socket, userId: string, state: any) {
 
     // 2. DROPPING PHASE (Capture End Prices & Results)
     if (state.phase === 'DROPPING') {
-        if (log && state.stocks?.[0]) {
+        if (log && state.stocks && state.stocks.length > 0) {
+            if (!log.stockDetails) log.stockDetails = [];
+
             // Update stock details with end results
             state.stocks.forEach((s: any) => {
                 const existing = log.stockDetails.find(d => d.symbol === s.symbol);
@@ -181,10 +183,10 @@ function handleGameState(socket: Socket, userId: string, state: any) {
                     existing.delta = s.delta;
                     existing.multiplierIndex = s.multiplierIndex;
                 } else {
-                    // Fallback if not init in betting
+                    // Fallback if not init in betting (e.g. late join)
                     log.stockDetails.push({
                         symbol: s.symbol,
-                        startPrice: 0, // Missed start
+                        startPrice: 0,
                         endPrice: s.currentPrice,
                         delta: s.delta,
                         multiplierIndex: s.multiplierIndex
@@ -192,7 +194,7 @@ function handleGameState(socket: Socket, userId: string, state: any) {
                 }
             });
 
-            if (!log.outcomeMessage) {
+            if (!log.outcomeMessage && state.stocks[0]) {
                 const firstStock = state.stocks[0];
                 log.outcomeMessage = `Example: ${firstStock.symbol} delta ${firstStock.delta}% -> Index ${firstStock.multiplierIndex}`;
                 console.log(`[Real Gameplay] Dropping! ${log.outcomeMessage}`);
