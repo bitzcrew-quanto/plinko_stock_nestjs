@@ -22,6 +22,7 @@ export default registerAs('app', () => ({
     gameName: process.env.GAME_NAME!,
     hqServiceUrl: process.env.HQ_SERVICE_URL!,
     hqServiceTimeout: parseInt(process.env.HQ_SERVICE_TIMEOUT || '5000', 10),
+    signatureSecret: process.env.SIGNATURE_SECRET!,
 
     // --- PLINKO CONFIG (9 Multipliers) ---
     plinko: {

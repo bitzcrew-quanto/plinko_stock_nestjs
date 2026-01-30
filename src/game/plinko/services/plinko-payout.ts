@@ -59,7 +59,7 @@ export class PlinkoPayoutService {
 
                 for (const bet of userBets) {
                     if (bet.tenantId) tenantId = bet.tenantId;
-                    currency = bet.currency;
+                    currency = typeof bet.currency === 'string' ? bet.currency : (bet.currency as any)?.name || 'USD';
 
                     totalWager += bet.amount;
 
@@ -120,7 +120,7 @@ export class PlinkoPayoutService {
             await this.http.creditWin({
                 sessionToken: bet.sessionToken,
                 winAmount: winAmount,
-                currency: bet.currency,
+                currency: typeof bet.currency === 'string' ? bet.currency : (bet.currency as any)?.name || 'USD',
                 transactionId: uuidv4(),
                 type: 'win',
                 metadata: { game: 'plinko', wagerTxId: bet.transactionId }

@@ -70,7 +70,8 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
             const session = JSON.parse(sessionDataString);
             client.session = session;
 
-            client.emit('updated_balance', { playerUpdatedBalance: parseFloat(client.session.currentBalance), currency: client.session.currency });
+            const currency = typeof client.session.currency === 'string' ? client.session.currency : (client.session.currency as any)?.name || 'USD';
+            client.emit('updated_balance', { playerUpdatedBalance: parseFloat(client.session.currentBalance), currency });
 
             const roomToJoin = client.session.room;
 
@@ -141,17 +142,17 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
                 if (rawState) {
                     const state = JSON.parse(rawState);
-                    
+
                     client.emit('game:state', state);
 
                     if (state.roundId) {
                         const roundBetsKey = getPlinkoRoundBetsKey(roomToJoin, state.roundId);
-                        
+
                         const userBetJson = await this.redisService.getStateClient().hGet(roundBetsKey, playerId);
-                        
+
                         if (userBetJson) {
                             const userBet = JSON.parse(userBetJson);
-                            client.emit('game:user_bets', [userBet]); 
+                            client.emit('game:user_bets', [userBet]);
                             this.logger.debug(`Restored bet for player ${playerId} in round ${state.roundId}`);
                         }
                     }
@@ -203,7 +204,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
             const size = this.server.sockets.adapter.rooms.get(room)?.size ?? 0;
             return size > 0;
         } catch {
-            return true; 
+            return true;
         }
     }
 

@@ -10,6 +10,7 @@ import {
     HqCreditRequest,
     HqCreditResponse
 } from './interfaces';
+import { createSignature } from 'src/common/security/signature.security';
 
 @Injectable()
 export class HttpService {
@@ -24,6 +25,13 @@ export class HttpService {
     async placeBet(request: HqBetRequest): Promise<HqBetResponse> {
         try {
             this.logger.log(`Placing bet via HQ service: ${this.config.hqServiceUrl}/api/transactions/bet`);
+            const timestamp = Date.now().toString();
+            const signature = createSignature({
+                method: 'POST',
+                path: '/api/transactions/bet',
+                body: request,
+                timestamp
+            }, this.config.signatureSecret);
 
             const response: AxiosResponse<HqBetResponse> = await this.getClient().post(
                 `${this.config.hqServiceUrl}/api/transactions/bet`,
@@ -32,6 +40,8 @@ export class HttpService {
                     timeout: this.config.hqServiceTimeout,
                     headers: {
                         'Content-Type': 'application/json',
+                        'x-timestamp': timestamp,
+                        'x-signature': signature
                     },
                 }
             );
@@ -47,6 +57,13 @@ export class HttpService {
     async creditWin(request: HqCreditRequest): Promise<HqCreditResponse> {
         try {
             this.logger.log(`Crediting win via HQ service: ${this.config.hqServiceUrl}/api/transactions/credit`);
+            const timestamp = Date.now().toString();
+            const signature = createSignature({
+                method: 'POST',
+                path: '/api/transactions/credit',
+                body: request,
+                timestamp
+            }, this.config.signatureSecret);
 
             const response: AxiosResponse<HqCreditResponse> = await this.getClient().post(
                 `${this.config.hqServiceUrl}/api/transactions/credit`,
@@ -55,6 +72,8 @@ export class HttpService {
                     timeout: this.config.hqServiceTimeout,
                     headers: {
                         'Content-Type': 'application/json',
+                        'x-timestamp': timestamp,
+                        'x-signature': signature
                     },
                 }
             );
