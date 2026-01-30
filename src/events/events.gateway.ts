@@ -1,4 +1,5 @@
 import { forwardRef, Inject, Logger } from '@nestjs/common';
+import type { ConfigType } from '@nestjs/config';
 import {
     OnGatewayConnection,
     OnGatewayDisconnect,
@@ -8,10 +9,12 @@ import {
 import { Server } from 'socket.io';
 import { MarketDataPayload } from 'src/redis/dto/market-data.dto';
 import type { AuthenticatedSocket } from 'src/common/types/socket.types';
+import appConfig from 'src/config/app.config';
 import { RedisService } from 'src/redis/redis.service';
 import { BalanceUpdateService } from 'src/redis/balance-update.service';
 import { MarketStatusService } from 'src/markets/market-status.service';
 import { getKeyForPlayerSession, getKeyForLastMarketSnapshot, getPlinkoStateKey, getPlinkoRoundBetsKey } from 'src/redis/redis.keys';
+import { convertBalance } from 'src/common/utils/currency';
 
 @WebSocketGateway({
     cors: {
@@ -24,6 +27,9 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly logger = new Logger(EventsGateway.name);
 
     constructor(
+        @Inject(appConfig.KEY)
+        private readonly config: ConfigType<typeof appConfig>,
+
         @Inject(forwardRef(() => RedisService))
         private readonly redisService: RedisService,
 
@@ -33,19 +39,19 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
         private readonly marketStatus: MarketStatusService,
     ) { }
 
+    private emitClientError(client: AuthenticatedSocket, type: string, code: string, message: string) {
+        try {
+            client.emit('error', { type, code, message });
+        } catch { }
+    }
+
     async handleConnection(client: AuthenticatedSocket) {
         try {
             const token = client.handshake.auth.token;
 
             if (!token) {
                 this.logger.warn(`Connection rejected: No token provided by socket ${client.id}`);
-                try {
-                    client.emit('error', {
-                        type: 'auth',
-                        code: 'NO_TOKEN',
-                        message: 'Authentication required. Please open the game from your lobby.'
-                    });
-                } catch { }
+                this.emitClientError(client, 'auth', 'NO_TOKEN', 'Authentication required. Please open the game from your lobby.');
                 client.disconnect(true);
                 return;
             }
@@ -55,13 +61,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
             if (!sessionDataString) {
                 this.logger.warn(`Invalid session token for socket ${client.id}. Terminating.`);
-                try {
-                    client.emit('error', {
-                        type: 'auth',
-                        code: 'INVALID_SESSION',
-                        message: 'Invalid session. Please reopen the game from your lobby.'
-                    });
-                } catch { }
+                this.emitClientError(client, 'auth', 'INVALID_SESSION', 'Invalid session. Please reopen the game from your lobby.');
                 client.disconnect(true);
                 return;
             }
@@ -70,8 +70,23 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
             const session = JSON.parse(sessionDataString);
             client.session = session;
 
-            const currency = typeof client.session.currency === 'string' ? client.session.currency : (client.session.currency as any)?.name || 'USD';
-            client.emit('updated_balance', { playerUpdatedBalance: parseFloat(client.session.currentBalance), currency });
+            const requestedMarket = (client.handshake.auth && typeof client.session.room === 'string') ? String(client.session.room) : undefined;
+            const configured = Array.isArray(this.config.subscribeChannels) ? this.config.subscribeChannels : [];
+
+            if (requestedMarket && !configured.includes(requestedMarket)) {
+                this.logger.warn(`Client ${client.id} requested invalid market: ${requestedMarket}`);
+                this.emitClientError(client, 'auth', 'INVALID_MARKET', 'Requested market is not available.');
+                client.disconnect(true);
+                return;
+            }
+
+            const convertedBalance = convertBalance(client.session.currentBalance, client.session.currency.conversionRateToBase);
+
+            client.emit('updated_balance', {
+                playerUpdatedBalance: convertedBalance,
+                currency: client.session.currency.name,
+                currencySymbol: client.session.currency.symbol
+            });
 
             const roomToJoin = client.session.room;
 

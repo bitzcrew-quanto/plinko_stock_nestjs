@@ -38,7 +38,7 @@ export class PlinkoBetService {
             deduction = await this.http.placeBet({
                 sessionToken: client.session.sessionToken,
                 betAmount: amount,
-                currency: typeof client.session.currency === 'string' ? client.session.currency : (client.session.currency as any)?.name || 'USD',
+                currency: client.session.currency.name,
                 transactionId,
                 metadata: { game: 'plinko', roundId: state.roundId, stocks, tenantId }
             });
@@ -60,7 +60,7 @@ export class PlinkoBetService {
             stocks,
             transactionId,
             sessionToken: client.session.sessionToken,
-            currency: typeof client.session.currency === 'string' ? client.session.currency : (client.session.currency as any)?.name || 'USD',
+            currency: client.session.currency.name,
             placedAt: Date.now()
         };
 

@@ -13,7 +13,11 @@ export interface SessionData {
     gameId: number; // Game database ID
     createdAt: string; // ISO string
     expiresAt: string; // ISO string
-    currency: string;
+    currency: {
+        name: string;
+        symbol: string;
+        conversionRateToBase: string;
+    };
     mode: string; // 'real' | 'demo' | etc.
     room: string;
     language: string;
