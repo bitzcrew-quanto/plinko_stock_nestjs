@@ -27,11 +27,12 @@ export default registerAs('app', () => ({
     // --- PLINKO CONFIG (9 Multipliers) ---
     plinko: {
         // 9 Bins -> 8 Rows. 
-        // Layout: Crash(Left) <--> Center(Stable) <--> Moon(Right)
+        // Layout: RED(0x) <--> YELLOW(0.5-1.4x) <--> GREEN(1.5-5x)
         // Indices: 0, 1, 2, 3, [4], 5, 6, 7, 8
+        // Multipliers: [4, 2, 1.4, 0, 0.5, 0, 1.2, 1.5, 5]
         multipliers: parseMultipliers(
             process.env.PLINKO_MULTIPLIERS,
-            [10, 5, 3, 1.5, 0.5, 1.5, 3, 5, 10]
+            [4, 2, 1.4, 0, 0.5, 0, 1.2, 1.5, 5]
         ),
 
         // Timings (ms)
@@ -41,7 +42,12 @@ export default registerAs('app', () => ({
         payoutTime: parseInt(process.env.PLINKO_PAYOUT_TIME_MS || '5000', 10),
 
         // Rules
-        stockCount: parseInt(process.env.PLINKO_STOCK_COUNT || '20', 10),
+        stockCount: parseInt(process.env.PLINKO_STOCK_COUNT || '10', 10),
+
+        // RTP Configuration
+        desiredRTP: parseFloat(process.env.DESIRED_RTP || '96.5'),
+        rtpThresholdPlayCount: parseInt(process.env.THRESHOLD_PLAYCOUNT || '100', 10),
+        rtpLimitPlayCount: parseInt(process.env.LIMIT_PLAYCOUNT || '1000', 10),
     },
 
     // Redis Configs

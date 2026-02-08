@@ -23,14 +23,16 @@ export class PlinkoEngineService {
 
     /**
      * Determines the winning multiplier index for each stock based on price performance.
-     * Pure math calculation, no path generation.
+     * Now uses RTP-aware decision logic instead of pure math calculation.
      */
-    calculateRoundResults(
+    async calculateRoundResults(
+        market: string,
         stocks: string[],
         startSnapshot: MarketDataPayload,
-        endSnapshot: MarketDataPayload
-    ): PlinkoResult[] {
-        // Default: [10, 5, 3, 1.5, 0.5, 1.5, 3, 5, 10]
+        endSnapshot: MarketDataPayload,
+        rtpDecisionService: any // Will be injected from game-loop
+    ): Promise<PlinkoResult[]> {
+        // Default: [4, 2, 1.4, 0, 0.5, 0, 1.2, 1.5, 5]
         const multipliers = this.config.plinko.multipliers;
         const bins = multipliers.length;
 
@@ -39,9 +41,8 @@ export class PlinkoEngineService {
             return [];
         }
 
-        const results: PlinkoResult[] = [];
-
-        for (const stock of stocks) {
+        // Calculate deltas for all stocks
+        const stockDeltas = stocks.map(stock => {
             const start = startSnapshot.symbols[stock]?.price || 0;
             const end = endSnapshot.symbols[stock]?.price || 0;
 
@@ -50,44 +51,35 @@ export class PlinkoEngineService {
                 delta = ((end - start) / start) * 100;
             }
 
-            const index = this.mapDeltaToSlot(delta, bins);
-
-            results.push({
+            return {
                 stockName: stock,
+                delta: parseFloat(delta.toFixed(3))
+            };
+        });
+
+        // Get RTP-based decisions for all stocks
+        const rtpDecisions = await rtpDecisionService.determineMultiplierIndices(market, stockDeltas);
+
+        // Build results from RTP decisions
+        const results: PlinkoResult[] = rtpDecisions.map(decision => {
+            const start = startSnapshot.symbols[decision.stockName]?.price || 0;
+            const end = endSnapshot.symbols[decision.stockName]?.price || 0;
+
+            return {
+                stockName: decision.stockName,
                 startPrice: start,
                 endPrice: end,
-                deltaPercent: parseFloat(delta.toFixed(3)),
-                multiplierIndex: index,
-                multiplier: multipliers[index]
-            });
-        }
+                deltaPercent: decision.delta,
+                multiplierIndex: decision.multiplierIndex,
+                multiplier: decision.multiplier
+            };
+        });
 
         return results;
     }
 
     /**
-     * Maps market movement to a bin index.
-     * * Logic:
-     * - Negative Delta (Down) -> Moves Index Lower (Left)
-     * - Positive Delta (Up)   -> Moves Index Higher (Right)
-     * - Near Zero Delta       -> Stays at Center
-     */
-    private mapDeltaToSlot(delta: number, totalBins: number): number {
-        // Sensitivity: How much % change moves the ball 1 slot?
-        // e.g., 0.15 means 0.15% change shifts 1 slot.
-        // Adjust this if you want the game to be more/less volatile to price changes.
-        const sensitivity = 0.02;
-
-        const center = (totalBins - 1) / 2;
-
-        const shift = delta / sensitivity;
-        let target = Math.round(center + shift);
-
-        return Math.max(0, Math.min(totalBins - 1, target));
-    }
-
-    /**
-     * Randomly selects the 20 stocks for the round from the active market feed.
+     * Randomly selects the stocks for the round from the active market feed.
      */
     selectGameStocks(snapshot: MarketDataPayload): string[] {
         const count = this.config.plinko.stockCount;

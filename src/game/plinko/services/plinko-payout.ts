@@ -6,6 +6,7 @@ import { getPlinkoRoundBetsKey } from 'src/redis/redis.keys';
 import { PlinkoResult } from './plinko-engine';
 import { v4 as uuidv4 } from 'uuid';
 import { BalanceUpdateService } from 'src/redis/balance-update.service';
+import { RTPTrackerService } from './rtp-tracker.service';
 
 @Injectable()
 export class PlinkoPayoutService {
@@ -16,6 +17,7 @@ export class PlinkoPayoutService {
         private readonly http: HttpService,
         private readonly events: EventsGateway,
         private readonly balanceService: BalanceUpdateService,
+        private readonly rtpTracker: RTPTrackerService,
     ) { }
 
     async processRoundPayouts(market: string, roundId: string) {
@@ -35,6 +37,10 @@ export class PlinkoPayoutService {
         results.forEach(r => stockMultipliers.set(r.stockName, r.multiplier));
 
         const payoutPromises: Promise<void>[] = [];
+
+        // Track round-level RTP metrics
+        let roundTotalBet = 0;
+        let roundTotalWon = 0;
 
         for (const [playerId, betsJson] of Object.entries(allBetsMap)) {
             try {
@@ -86,6 +92,11 @@ export class PlinkoPayoutService {
                         payoutPromises.push(this.creditPlayer(bet, betWin));
                     }
                 }
+
+                // Accumulate round totals
+                roundTotalBet += totalWager;
+                roundTotalWon += totalPayout;
+
                 if (tenantId) {
                     const room = this.balanceService.getPlayerBalanceRoom(tenantId, playerId);
 
@@ -107,6 +118,15 @@ export class PlinkoPayoutService {
             } catch (e) {
                 this.logger.error(`Error processing bets for player ${playerId}: ${e.message}`);
             }
+        }
+
+        // Record RTP metrics for this round
+        if (roundTotalBet > 0) {
+            await this.rtpTracker.recordWin(market, roundTotalWon);
+            this.logger.log(
+                `[RTP Tracking] Round ${roundId} | Bet: ${roundTotalBet.toFixed(2)} | Won: ${roundTotalWon.toFixed(2)} | ` +
+                `RTP: ${((roundTotalWon / roundTotalBet) * 100).toFixed(2)}%`
+            );
         }
 
         await Promise.allSettled(payoutPromises);

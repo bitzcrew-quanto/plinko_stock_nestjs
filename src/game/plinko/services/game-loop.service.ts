@@ -7,6 +7,7 @@ import { PlinkoEngineService } from './plinko-engine';
 import { RedisService } from 'src/redis/redis.service';
 import { HttpService } from 'src/http/http.service';
 import { PlinkoPayoutService } from './plinko-payout';
+import { RTPDecisionService } from './rtp-decision.service';
 import { getPlinkoStateKey, getPlinkoRoundBetsKey } from 'src/redis/redis.keys';
 import { v4 as uuidv4 } from 'uuid';
 import { GamePhase, PlinkoGlobalState, StockState } from './../dto/game-state';
@@ -29,6 +30,7 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
         private readonly eventsGateway: EventsGateway,
         private readonly httpService: HttpService,
         private readonly payoutService: PlinkoPayoutService,
+        private readonly rtpDecisionService: RTPDecisionService,
         @Inject(appConfig.KEY) private readonly config: ConfigType<typeof appConfig>,
     ) {
         this.TIMINGS = {
@@ -296,7 +298,14 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
 
         const stockNames = prevStocks.map(s => s.symbol);
 
-        const results = this.engineService.calculateRoundResults(stockNames, startSnapshot, endSnapshot);
+        // Call RTP-aware engine with all required parameters
+        const results = await this.engineService.calculateRoundResults(
+            market,
+            stockNames,
+            startSnapshot,
+            endSnapshot,
+            this.rtpDecisionService
+        );
 
         const updatedStocks = prevStocks.map(s => {
             const res = results.find(r => r.stockName === s.symbol);

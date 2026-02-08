@@ -5,6 +5,7 @@ import { getPlinkoStateKey, getPlinkoRoundBetsKey } from 'src/redis/redis.keys';
 import { GamePhase } from '../dto/game-state';
 import { AuthenticatedSocket } from 'src/common/types/socket.types';
 import { v4 as uuidv4 } from 'uuid';
+import { RTPTrackerService } from './rtp-tracker.service';
 
 @Injectable()
 export class PlinkoBetService {
@@ -12,7 +13,8 @@ export class PlinkoBetService {
 
     constructor(
         private readonly redis: RedisService,
-        private readonly http: HttpService
+        private readonly http: HttpService,
+        private readonly rtpTracker: RTPTrackerService,
     ) { }
 
     async placeBet(client: AuthenticatedSocket, amount: number, stocks: string[]) {
@@ -79,6 +81,9 @@ export class PlinkoBetService {
             keys: [betKey],
             arguments: [playerId, JSON.stringify(newBet)]
         });
+
+        // Track bet for RTP calculation
+        await this.rtpTracker.recordBet(market, amount);
 
         return {
             status: 'ACCEPTED',
