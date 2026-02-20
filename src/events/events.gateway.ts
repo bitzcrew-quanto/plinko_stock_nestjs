@@ -13,7 +13,7 @@ import appConfig from 'src/config/app.config';
 import { RedisService } from 'src/redis/redis.service';
 import { BalanceUpdateService } from 'src/redis/balance-update.service';
 import { MarketStatusService } from 'src/markets/market-status.service';
-import { getKeyForPlayerSession, getKeyForLastMarketSnapshot, getPlinkoStateKey, getPlinkoRoundBetsKey } from 'src/redis/redis.keys';
+import { getKeyForPlayerSession, getKeyForLastMarketSnapshot, getPlinkoStateKey, getPlinkoRoundBetsKey, getPlinkoGlobalLeaderboardKey, getPlinkoMarketHistoryKey } from 'src/redis/redis.keys';
 import { convertBalance } from 'src/common/utils/currency';
 
 @WebSocketGateway({
@@ -177,6 +177,24 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
                 }
             } catch (error) {
                 this.logger.error(`Error restoring state for player ${playerId}: ${error.message}`);
+            }
+
+            try {
+                const lKey = getPlinkoGlobalLeaderboardKey();
+                const hKey = getPlinkoMarketHistoryKey(roomToJoin);
+
+                const [leaders, history] = await Promise.all([
+                    this.redisService.getStateClient().zRange(lKey, 0, 24, { REV: true }),
+                    this.redisService.getStateClient().lRange(hKey, 0, 19)
+                ]);
+
+                client.emit('initial_sync', {
+                    leaderboard: leaders.map(l => JSON.parse(l)),
+                    gameHistory: history.map(h => JSON.parse(h))
+                });
+                this.logger.log(`Sent initial_sync to client ${client.id} for room ${roomToJoin}`);
+            } catch (e) {
+                this.logger.error(`Failed to push initial data to ${client.id}: ${e.message}`);
             }
 
         } catch (err) {

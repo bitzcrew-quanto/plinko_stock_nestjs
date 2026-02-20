@@ -6,7 +6,7 @@ import {
     WebSocketServer,
 } from '@nestjs/websockets';
 import { Server } from 'socket.io';
-import { UseFilters, UsePipes, ValidationPipe, Logger } from '@nestjs/common';
+import { Logger } from '@nestjs/common';
 import { PlinkoBetService } from './services/plinko-bet';
 import type { AuthenticatedSocket } from 'src/common/types/socket.types';
 
@@ -22,7 +22,9 @@ export class PlinkoGateway {
 
     private readonly logger = new Logger(PlinkoGateway.name);
 
-    constructor(private readonly betService: PlinkoBetService) { }
+    constructor(
+        private readonly betService: PlinkoBetService,
+    ) { }
 
     @SubscribeMessage('place_bet')
     async handlePlaceBet(
@@ -30,16 +32,9 @@ export class PlinkoGateway {
         @MessageBody() payload: { amount: number; stocks: string[] }
     ) {
         try {
-            // this.logger.debug(`Received bet from ${client.id}: ${JSON.stringify(payload)}`);
-            const result = await this.betService.placeBet(client, payload.amount, payload.stocks);
-            // client.emit('bet_accepted', result); // Optional: confirm to client
-            return result;
+            return await this.betService.placeBet(client, payload.amount, payload.stocks);
         } catch (error) {
-            this.logger.error(`Bet failed for ${client.id}: ${error.message}`);
-            client.emit('error', {
-                type: 'bet_error',
-                message: error.message
-            });
+            client.emit('error', { type: 'bet_error', message: error.message });
         }
     }
 
@@ -49,13 +44,9 @@ export class PlinkoGateway {
         @MessageBody() payload: { transactionId: string }
     ) {
         try {
-            const result = await this.betService.cancelBet(client, payload.transactionId);
-            return result;
+            return await this.betService.cancelBet(client, payload.transactionId);
         } catch (error) {
-            client.emit('error', {
-                type: 'cancel_error',
-                message: error.message
-            });
+            client.emit('error', { type: 'cancel_error', message: error.message });
         }
     }
 }

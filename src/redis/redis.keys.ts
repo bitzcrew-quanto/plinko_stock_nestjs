@@ -1,4 +1,3 @@
-// --- Core Session Keys ---
 export const getKeyForPlayerSession = (sessionToken: string): string => {
     return `session:${sessionToken}`;
 };
@@ -30,8 +29,7 @@ export const getPlinkoStateKey = (room: string): string => {
 };
 
 /**
- * Stores the list of 20 active stocks selected for the current round.
- * Structure: JSON Array [ { symbol: 'AAPL', ... }, ... ]
+ * Stores the list of active stocks selected for the current round.
  */
 export const getPlinkoStocksKey = (room: string): string => {
     return `plinko:${room}:stocks`;
@@ -46,8 +44,27 @@ export const getPlinkoRoundBetsKey = (room: string, roundId: string): string => 
 };
 
 /**
- * (Optional) Key for history verification or audit
+ * Key for history verification or audit
  */
 export const getPlinkoRoundResultKey = (room: string, roundId: string): string => {
     return `plinko:${room}:result:${roundId}`;
+};
+
+// --- Leaderboard & History Keys ---
+
+/**
+ * Stores top payouts globally (Score = Payout, Value = JSON of player data)
+ */
+export const getPlinkoGlobalLeaderboardKey = (): string => `plinko:leaderboard:global`;
+
+/**
+ * Stores the last 20 public round results for a specific market (Roadmap)
+ */
+export const getPlinkoMarketHistoryKey = (market: string): string => `plinko:${market}:history`;
+
+/**
+ * Stores a specific player's personal bet history (Last 20 bets)
+ */
+export const getPlinkoPlayerHistoryKey = (playerId: string): string => {
+    return `plinko:history:player:${playerId}`;
 };

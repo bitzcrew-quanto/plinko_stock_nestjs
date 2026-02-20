@@ -2,11 +2,24 @@ import { Injectable, Logger } from '@nestjs/common';
 import { RedisService } from 'src/redis/redis.service';
 import { HttpService } from 'src/http/http.service';
 import { EventsGateway } from 'src/events/events.gateway';
-import { getPlinkoRoundBetsKey } from 'src/redis/redis.keys';
+import {
+    getPlinkoRoundBetsKey,
+    getPlinkoGlobalLeaderboardKey,
+    getPlinkoMarketHistoryKey,
+    getPlinkoPlayerHistoryKey
+} from 'src/redis/redis.keys';
 import { PlinkoResult } from './plinko-engine';
 import { v4 as uuidv4 } from 'uuid';
 import { BalanceUpdateService } from 'src/redis/balance-update.service';
 import { RTPTrackerService } from './rtp-tracker.service';
+
+interface BetBreakdown {
+    betId: string;
+    stocks: string[];
+    wager: number;
+    payout: number;
+    multiplier: number;
+}
 
 @Injectable()
 export class PlinkoPayoutService {
@@ -37,101 +50,125 @@ export class PlinkoPayoutService {
         results.forEach(r => stockMultipliers.set(r.stockName, r.multiplier));
 
         const payoutPromises: Promise<void>[] = [];
-
-        // Track round-level RTP metrics
         let roundTotalBet = 0;
         let roundTotalWon = 0;
 
+        const leaderboardKey = getPlinkoGlobalLeaderboardKey();
+        const historyKey = getPlinkoMarketHistoryKey(market);
+
         for (const [playerId, betsJson] of Object.entries(allBetsMap)) {
             try {
-                let userBets: any[] = [];
-                try {
-                    userBets = JSON.parse(betsJson);
-                } catch {
-                    userBets = [JSON.parse(betsJson)];
-                }
+                let userBets = JSON.parse(betsJson);
+                if (!Array.isArray(userBets)) userBets = [userBets];
 
                 let totalWager = 0;
                 let totalPayout = 0;
-                const betBreakdowns: {
-                    betId: any;
-                    stocks: any;
-                    wager: any;
-                    payout: number;
-                    multiplier: number;
-                }[] = [];
+                let maxMultiplier = 0;
+                const betBreakdowns: BetBreakdown[] = [];
                 let tenantId = '';
                 let currency = 'USD';
 
                 for (const bet of userBets) {
                     if (bet.tenantId) tenantId = bet.tenantId;
                     currency = typeof bet.currency === 'string' ? bet.currency : (bet.currency as any)?.name || 'USD';
-
                     totalWager += bet.amount;
 
                     let betWin = 0;
-                    if (bet.stocks && bet.stocks.length > 0) {
+                    if (bet.stocks?.length > 0) {
                         const betPerStock = bet.amount / bet.stocks.length;
                         for (const stock of bet.stocks) {
-                            const multiplier = stockMultipliers.get(stock) || 0;
-                            betWin += (betPerStock * multiplier);
+                            const m = stockMultipliers.get(stock) || 0;
+                            betWin += (betPerStock * m);
                         }
                     }
 
-                    totalPayout += betWin;
+                    const currentMultiplier = betWin > 0 ? (betWin / bet.amount) : 0;
+                    if (currentMultiplier > maxMultiplier) maxMultiplier = currentMultiplier;
 
+                    totalPayout += betWin;
                     betBreakdowns.push({
                         betId: bet.transactionId,
                         stocks: bet.stocks,
                         wager: bet.amount,
-                        payout: betWin,
-                        multiplier: betWin > 0 ? (betWin / bet.amount) : 0
+                        payout: Number(betWin.toFixed(2)),
+                        multiplier: Number(currentMultiplier.toFixed(2))
                     });
 
-                    if (betWin > 0) {
-                        payoutPromises.push(this.creditPlayer(bet, betWin));
-                    }
+                    if (betWin > 0) payoutPromises.push(this.creditPlayer(bet, betWin));
                 }
 
-                // Accumulate round totals
                 roundTotalBet += totalWager;
                 roundTotalWon += totalPayout;
 
+                if (totalPayout > 0) {
+                    const leaderData = JSON.stringify({
+                        id: playerId.substring(0, 6) + '***',
+                        payout: Number(totalPayout.toFixed(2)),
+                        multiplier: Number(maxMultiplier.toFixed(2))
+                    });
+
+                    await this.redis.getStateClient().zAdd(leaderboardKey, { score: totalPayout, value: leaderData });
+                    await this.redis.getStateClient().zRemRangeByRank(leaderboardKey, 0, -101);
+                }
+
+                const personalHistoryEntry = JSON.stringify({
+                    roundId,
+                    t: Date.now(),
+                    wager: Number(totalWager.toFixed(2)),
+                    payout: Number(totalPayout.toFixed(2)),
+                    net: Number((totalPayout - totalWager).toFixed(2)),
+                    details: betBreakdowns
+                });
+                const playerHistoryKey = getPlinkoPlayerHistoryKey(playerId);
+                const playerPipe = this.redis.getStateClient().multi();
+                playerPipe.lPush(playerHistoryKey, personalHistoryEntry);
+                playerPipe.lTrim(playerHistoryKey, 0, 19);
+                await playerPipe.exec();
+
                 if (tenantId) {
                     const room = this.balanceService.getPlayerBalanceRoom(tenantId, playerId);
-
-                    const payload = {
+                    this.events.server.to(room).emit('game:payout', {
                         roundId,
                         currency,
                         totalWager: Number(totalWager.toFixed(2)),
                         totalPayout: Number(totalPayout.toFixed(2)),
                         netProfit: Number((totalPayout - totalWager).toFixed(2)),
                         bets: betBreakdowns
-                    };
-
-                    this.logger.log(`[Payout] Emitting to room: ${room} | Player: ${playerId} | Win: ${totalPayout}`);
-                    this.events.server.to(room).emit('game:payout', payload);
-                } else {
-                    this.logger.warn(`Missing tenantId for player ${playerId}, cannot emit win popup.`);
+                    });
                 }
-
             } catch (e) {
                 this.logger.error(`Error processing bets for player ${playerId}: ${e.message}`);
             }
         }
 
-        // Record RTP metrics for this round
-        if (roundTotalBet > 0) {
-            await this.rtpTracker.recordWin(market, roundTotalWon);
-            this.logger.log(
-                `[RTP Tracking] Round ${roundId} | Bet: ${roundTotalBet.toFixed(2)} | Won: ${roundTotalWon.toFixed(2)} | ` +
-                `RTP: ${((roundTotalWon / roundTotalBet) * 100).toFixed(2)}%`
-            );
-        }
+        const topResult = results.reduce((prev, current) =>
+            (prev.multiplier > current.multiplier) ? prev : current
+        );
+
+        const historyEntry = {
+            id: roundId,
+            t: Date.now(),
+            top: { s: topResult.stockName, m: topResult.multiplier },
+            res: results.map(r => ({ s: r.stockName, m: r.multiplier }))
+        };
+
+        const pipe = this.redis.getStateClient().multi();
+        pipe.lPush(historyKey, JSON.stringify(historyEntry));
+        pipe.lTrim(historyKey, 0, 19);
+        await pipe.exec();
+
+        const updatedTop25 = await this.redis.getStateClient().zRange(leaderboardKey, 0, 24, { REV: true });
+        this.events.server.emit('leaderboard_update', updatedTop25.map(l => JSON.parse(l)));
+
+        this.events.server.to(market).emit('history_update', historyEntry);
+
+        if (roundTotalBet > 0) await this.rtpTracker.recordWin(market, roundTotalWon);
 
         await Promise.allSettled(payoutPromises);
+
         await this.redis.del(betsKey);
         await this.redis.del(`plinko:${market}:${roundId}:results`);
+
         this.logger.log(`Payouts completed for ${market}:${roundId}`);
     }
 
