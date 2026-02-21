@@ -177,7 +177,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
                 if (rawState) {
                     const state = JSON.parse(rawState);
-
+                    state.serverTime = Date.now();
                     client.emit('game:state', state);
 
                     if (state.roundId) {
