@@ -127,6 +127,23 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
             const tenantId = client.session.tenantPublicId;
             const playerId = client.session.tenantPlayerId;
             const playerBalanceRoom = this.balanceUpdateService.getPlayerBalanceRoom(tenantId, playerId);
+
+            const existingSockets = await this.server.in(playerBalanceRoom).fetchSockets();
+            if (existingSockets.length > 0) {
+                this.logger.warn(`Connection rejected: Player ${playerId} already active in another instance.`);
+
+                try {
+                    client.emit('error', {
+                        type: 'auth',
+                        code: 'MULTIPLE_TABS',
+                        message: 'You already have an active session in another tab.'
+                    });
+                } catch { }
+
+                client.disconnect(true);
+                return;
+            }
+
             client.join(playerBalanceRoom);
 
             const updateSessionTimestamp = async () => {
