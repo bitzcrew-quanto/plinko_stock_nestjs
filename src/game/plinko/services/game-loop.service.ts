@@ -208,7 +208,7 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
         } else {
             state.serverTime = now;
 
-            if (state.phase === GamePhase.ACCUMULATION) {
+            if (state.phase !== GamePhase.BETTING) {
                 const snapshot = await this.priceService.getMarketSnapshot(market);
                 if (snapshot) {
                     state.stocks = state.stocks.map(s => {
@@ -424,10 +424,36 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
                 if (!Array.isArray(userBets)) userBets = [userBets];
 
                 for (const bet of userBets) {
+                    try {
+                        const sessionKey = `session:${bet.sessionToken}`; // From getKeyForPlayerSession
+                        const rawSession = await this.redisService.get(sessionKey);
+                        let isDemoMode = false;
+
+                        if (rawSession) {
+                            const session = JSON.parse(rawSession);
+                            isDemoMode = session.mode === 'demo';
+
+                            if (isDemoMode) {
+                                const currentBalance = parseFloat(session.currentBalance || '0');
+                                const newBalance = currentBalance + (bet.amount || 0);
+                                session.currentBalance = String(newBalance);
+                                session.updatedAt = new Date().toISOString();
+                                await this.redisService.set(sessionKey, JSON.stringify(session));
+
+                                // Since game-loop doesn't have the socket direct ref, 
+                                // the user will get their balance when they refresh or next bet,
+                                // but we could also broadcast to tenant updates channel if needed.
+                                continue; // Skip HQ step
+                            }
+                        }
+                    } catch (e) {
+                        // Ignore error during demo check, fallback to HQ
+                    }
+
                     await this.httpService.creditWin({
                         sessionToken: bet.sessionToken,
                         winAmount: bet.amount,
-                        currency: 'USD',
+                        currency: bet.currency || 'USD',
                         transactionId: uuidv4(),
                         type: 'refund',
                         metadata: { reason: 'market_outage', originalRound: roundId, originalBetId: bet.transactionId }

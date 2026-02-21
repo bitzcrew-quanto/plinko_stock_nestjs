@@ -6,7 +6,8 @@ import {
     getPlinkoRoundBetsKey,
     getPlinkoGlobalLeaderboardKey,
     getPlinkoMarketHistoryKey,
-    getPlinkoPlayerHistoryKey
+    getPlinkoPlayerHistoryKey,
+    getKeyForPlayerSession
 } from 'src/redis/redis.keys';
 import { PlinkoResult } from './plinko-engine';
 import { v4 as uuidv4 } from 'uuid';
@@ -173,6 +174,29 @@ export class PlinkoPayoutService {
     }
 
     private async creditPlayer(bet: any, winAmount: number) {
+        try {
+            const sessionKey = getKeyForPlayerSession(bet.sessionToken);
+            const rawSession = await this.redis.get(sessionKey);
+            let isDemoMode = false;
+
+            if (rawSession) {
+                const session = JSON.parse(rawSession);
+                isDemoMode = session.mode === 'demo';
+
+                if (isDemoMode) {
+                    const currentBalance = parseFloat(session.currentBalance || '0');
+                    const newBalance = currentBalance + winAmount;
+                    session.currentBalance = String(newBalance);
+                    session.updatedAt = new Date().toISOString();
+                    await this.redis.set(sessionKey, JSON.stringify(session));
+                    // Return early to skip HQ
+                    return;
+                }
+            }
+        } catch (e) {
+            // Ignore session read error, fallback to HQ
+        }
+
         try {
             await this.http.creditWin({
                 sessionToken: bet.sessionToken,

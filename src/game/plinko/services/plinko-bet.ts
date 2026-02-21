@@ -1,7 +1,7 @@
 import { Inject, Injectable, Logger, BadRequestException, InternalServerErrorException } from '@nestjs/common';
 import { RedisService } from 'src/redis/redis.service';
 import { HttpService } from 'src/http/http.service';
-import { getPlinkoStateKey, getPlinkoRoundBetsKey } from 'src/redis/redis.keys';
+import { getKeyForPlayerSession, getPlinkoStateKey, getPlinkoRoundBetsKey } from 'src/redis/redis.keys';
 import { GamePhase } from '../dto/game-state';
 import { AuthenticatedSocket } from 'src/common/types/socket.types';
 import { v4 as uuidv4 } from 'uuid';
@@ -20,6 +20,30 @@ export class PlinkoBetService {
         @Inject(appConfig.KEY) private readonly config: ConfigType<typeof appConfig>,
     ) { }
 
+    private updateClientBalance(client: AuthenticatedSocket, newBalance: number): void {
+        const safeBalance = (typeof newBalance === 'number' && !Number.isNaN(newBalance)) ? newBalance : 0;
+        client.session.currentBalance = String(safeBalance);
+        client.emit('updated_balance', {
+            playerUpdatedBalance: safeBalance,
+            currency: (client.session.currency as any)?.name || 'USD'
+        });
+    }
+
+    private async updateSessionBalanceInRedis(sessionToken: string, newBalance: number): Promise<void> {
+        try {
+            const sessionKey = getKeyForPlayerSession(sessionToken);
+            const raw = await this.redis.get(sessionKey);
+            if (!raw) return;
+
+            const session = JSON.parse(raw);
+            session.currentBalance = String(newBalance);
+            session.updatedAt = new Date().toISOString();
+            await this.redis.set(sessionKey, JSON.stringify(session));
+        } catch (error) {
+            this.logger.error(`Failed to update session balance in Redis for demo: ${error}`);
+        }
+    }
+
     async placeBet(client: AuthenticatedSocket, amount: number, stocks: string[]) {
         const market = client.session.room;
         const playerId = client.session.tenantPlayerId;
@@ -37,22 +61,38 @@ export class PlinkoBetService {
 
 
         const transactionId = uuidv4();
-        let deduction;
+        const isDemoMode = client.session.mode === 'demo';
+        let newBalance = 0;
 
-        try {
-            deduction = await this.http.placeBet({
-                sessionToken: client.session.sessionToken,
-                betAmount: amount,
-                currency: client.session.currency.name,
-                transactionId,
-                metadata: { game: 'plinko', roundId: state.roundId, stocks, tenantId }
-            });
-        } catch (e) {
-            throw new BadRequestException('Wallet deduction failed');
-        }
+        if (isDemoMode) {
+            const currentBalance = parseFloat(client.session.currentBalance || '0');
+            if (!Number.isFinite(currentBalance) || amount <= 0) {
+                throw new BadRequestException('Invalid bet amount');
+            }
+            if (amount > currentBalance) {
+                throw new BadRequestException('Insufficient balance');
+            }
+            newBalance = currentBalance - amount;
+            this.updateClientBalance(client, newBalance);
+            await this.updateSessionBalanceInRedis(client.session.sessionToken, newBalance);
+        } else {
+            let deduction;
+            try {
+                deduction = await this.http.placeBet({
+                    sessionToken: client.session.sessionToken,
+                    betAmount: amount,
+                    currency: client.session.currency.name,
+                    transactionId,
+                    metadata: { game: 'plinko', roundId: state.roundId, stocks, tenantId }
+                });
+            } catch (e) {
+                throw new BadRequestException('Wallet deduction failed');
+            }
 
-        if (deduction.data.status !== 'SUCCESS') {
-            throw new BadRequestException('Insufficient balance');
+            if (deduction.data.status !== 'SUCCESS') {
+                throw new BadRequestException('Insufficient balance');
+            }
+            newBalance = deduction.data.newBalance;
         }
 
         const roundId = state.roundId;
@@ -90,7 +130,7 @@ export class PlinkoBetService {
 
         return {
             status: 'ACCEPTED',
-            newBalance: deduction.data.newBalance,
+            newBalance,
             roundId,
             transactionId
         };
@@ -151,24 +191,41 @@ export class PlinkoBetService {
 
         const bet = JSON.parse(removedBetString as string);
 
-        try {
-            const refundTx = await this.http.creditWin({
-                sessionToken: client.session.sessionToken,
-                winAmount: bet.amount,
-                currency: bet.currency,
-                transactionId: uuidv4(),
-                type: 'refund',
-                metadata: { reason: 'user_cancel', originalBetId: transactionId }
-            });
+        const isDemoMode = client.session.mode === 'demo';
+
+        if (isDemoMode) {
+            const currentBalance = parseFloat(client.session.currentBalance || '0');
+            const refundAmount = Math.max(0, bet.amount || 0);
+            const newBalance = currentBalance + refundAmount;
+
+            this.updateClientBalance(client, newBalance);
+            await this.updateSessionBalanceInRedis(client.session.sessionToken, newBalance);
 
             return {
                 status: 'CANCELLED',
-                refundAmount: bet.amount,
-                newBalance: refundTx.data.newBalance
+                refundAmount,
+                newBalance
             };
-        } catch (e) {
-            this.logger.error(`CRITICAL: Refund failed for ${playerId}, bet ${transactionId}`);
-            throw new InternalServerErrorException('Cancellation failed.');
+        } else {
+            try {
+                const refundTx = await this.http.creditWin({
+                    sessionToken: client.session.sessionToken,
+                    winAmount: bet.amount,
+                    currency: bet.currency,
+                    transactionId: uuidv4(),
+                    type: 'refund',
+                    metadata: { reason: 'user_cancel', originalBetId: transactionId }
+                });
+
+                return {
+                    status: 'CANCELLED',
+                    refundAmount: bet.amount,
+                    newBalance: refundTx.data.newBalance
+                };
+            } catch (e) {
+                this.logger.error(`CRITICAL: Refund failed for ${playerId}, bet ${transactionId}`);
+                throw new InternalServerErrorException('Cancellation failed.');
+            }
         }
     }
 }
