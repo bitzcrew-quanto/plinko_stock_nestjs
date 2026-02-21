@@ -74,3 +74,11 @@ export const getPlinkoMarketHistoryKey = (market: string): string => `plinko:${m
 export const getPlinkoPlayerHistoryKey = (playerId: string): string => {
     return `plinko:history:player:${playerId}`;
 };
+
+/**
+ * Stores the starting prices of stocks at the beginning of the Accumulation phase.
+ */
+export const getPlinkoMarketBaselinesKey = (market: string): string => {
+    const safe = market.toLowerCase();
+    return `plinko:${safe}:baselines`;
+};

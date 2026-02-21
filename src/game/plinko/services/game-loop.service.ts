@@ -206,10 +206,22 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
                     await this.startBettingPhase(market);
             }
         } else {
-            // Update server time and broadcast to keep clients synced
             state.serverTime = now;
-            // Note: We don't save to Redis every tick to save IO, just broadcast.
-            // But to be safe for failover, we could. For now, just emit.
+
+            if (state.phase === GamePhase.ACCUMULATION) {
+                const snapshot = await this.priceService.getMarketSnapshot(market);
+                if (snapshot) {
+                    state.stocks = state.stocks.map(s => {
+                        const currentPrice = snapshot.symbols[s.symbol]?.price || (s.currentPrice ?? 0);
+                        let delta = 0;
+                        if (s.startPrice && s.startPrice > 0) {
+                            delta = ((currentPrice - s.startPrice) / s.startPrice) * 100;
+                        }
+                        return { ...s, currentPrice, delta };
+                    });
+                }
+            }
+
             this.eventsGateway.server.to(market).emit('game:state', state);
 
             const nextTick = Math.min(timeLeft, 1000);
