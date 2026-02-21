@@ -11,6 +11,12 @@ export const getKeyForLastMarketSnapshot = (market: string): string => {
     return `market:last:${safe}`;
 };
 
+export const getKeyForGameValidStocks = (gameId: string, market: string): string =>
+    `game:${gameId}:valid_stocks:${market}`;
+
+export const getGameRefetchChannel = (gameId: string): string =>
+    `game:${gameId}:refetch_stocks`;
+
 export const getMarketConfigsKey = (): string => {
     return 'markets';
 };

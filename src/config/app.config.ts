@@ -20,6 +20,7 @@ export default registerAs('app', () => ({
     corsOrigin: process.env.CORS_ORIGIN || '*',
 
     gameName: process.env.GAME_NAME!,
+    gamePublicId: process.env.GAME_PUBLIC_ID!,
     hqServiceUrl: process.env.HQ_SERVICE_URL!,
     hqServiceTimeout: parseInt(process.env.HQ_SERVICE_TIMEOUT || '5000', 10),
     signatureSecret: process.env.SIGNATURE_SECRET!,

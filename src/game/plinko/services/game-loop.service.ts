@@ -126,24 +126,26 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
         const snapshot = await this.priceService.getMarketSnapshot(market);
 
         const isFresh = snapshot && this.priceService.isSnapshotFresh(snapshot, 5);
+        const hasEnoughStocks = snapshot && Object.keys(snapshot.symbols || {}).length >= this.config.plinko.stockCount;
 
-        if (!isFresh) {
+        if (!isFresh || !hasEnoughStocks) {
             const stateKey = getPlinkoStateKey(market);
             const rawState = await this.redisService.get(stateKey);
             const state = rawState ? JSON.parse(rawState) : {};
 
             if (state.phase !== GamePhase.PAUSED) {
-                this.logger.warn(`[Circuit Breaker] Market ${market} stale. Triggering Emergency Stop.`);
+                const reason = !isFresh ? 'Market data stale' : 'Insufficient valid stocks';
+                this.logger.warn(`[Circuit Breaker] Market ${market} unstable: ${reason}. Triggering Emergency Stop.`);
 
                 await this.handleEmergencyClose(market);
 
                 await this.redisService.set(stateKey, JSON.stringify({
                     phase: GamePhase.PAUSED,
-                    message: 'Market data unstable',
+                    message: reason,
                     nextCheck: Date.now() + 2000
                 }));
 
-                this.eventsGateway.broadcastMarketStatus(market, 'CLOSED', 'Market data unavailable');
+                this.eventsGateway.broadcastMarketStatus(market, 'CLOSED', reason);
             }
             return false;
         }

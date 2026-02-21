@@ -1,4 +1,4 @@
-import { Injectable, Logger, BadRequestException, InternalServerErrorException } from '@nestjs/common';
+import { Inject, Injectable, Logger, BadRequestException, InternalServerErrorException } from '@nestjs/common';
 import { RedisService } from 'src/redis/redis.service';
 import { HttpService } from 'src/http/http.service';
 import { getPlinkoStateKey, getPlinkoRoundBetsKey } from 'src/redis/redis.keys';
@@ -6,6 +6,8 @@ import { GamePhase } from '../dto/game-state';
 import { AuthenticatedSocket } from 'src/common/types/socket.types';
 import { v4 as uuidv4 } from 'uuid';
 import { RTPTrackerService } from './rtp-tracker.service';
+import type { ConfigType } from '@nestjs/config';
+import appConfig from 'src/config/app.config';
 
 @Injectable()
 export class PlinkoBetService {
@@ -15,6 +17,7 @@ export class PlinkoBetService {
         private readonly redis: RedisService,
         private readonly http: HttpService,
         private readonly rtpTracker: RTPTrackerService,
+        @Inject(appConfig.KEY) private readonly config: ConfigType<typeof appConfig>,
     ) { }
 
     async placeBet(client: AuthenticatedSocket, amount: number, stocks: string[]) {
@@ -32,7 +35,10 @@ export class PlinkoBetService {
         if (!amount || amount <= 0) throw new BadRequestException('Invalid amount');
         if (!stocks || stocks.length === 0 || stocks.length > 20) throw new BadRequestException('Invalid stock selection');
 
-        // B. WALLET DEDUCTION
+        if (stocks.length < this.config.plinko.stockCount) {
+            throw new BadRequestException(`Insufficient stocks selection. Expected at least ${this.config.plinko.stockCount}.`);
+        }
+
         const transactionId = uuidv4();
         let deduction;
 
