@@ -33,11 +33,8 @@ export class PlinkoBetService {
         }
 
         if (!amount || amount <= 0) throw new BadRequestException('Invalid amount');
-        if (!stocks || stocks.length === 0 || stocks.length > 20) throw new BadRequestException('Invalid stock selection');
+        if (!stocks || stocks.length === 0 || stocks.length > this.config.plinko.stockCount) throw new BadRequestException('Invalid stock selection');
 
-        if (stocks.length < this.config.plinko.stockCount) {
-            throw new BadRequestException(`Insufficient stocks selection. Expected at least ${this.config.plinko.stockCount}.`);
-        }
 
         const transactionId = uuidv4();
         let deduction;

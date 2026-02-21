@@ -8,6 +8,7 @@ import { RedisService } from 'src/redis/redis.service';
 import { HttpService } from 'src/http/http.service';
 import { PlinkoPayoutService } from './plinko-payout';
 import { RTPDecisionService } from './rtp-decision.service';
+import { MarketStatusService } from 'src/markets/market-status.service';
 import { getPlinkoStateKey, getPlinkoRoundBetsKey } from 'src/redis/redis.keys';
 import { v4 as uuidv4 } from 'uuid';
 import { GamePhase, PlinkoGlobalState, StockState } from './../dto/game-state';
@@ -31,6 +32,7 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
         private readonly httpService: HttpService,
         private readonly payoutService: PlinkoPayoutService,
         private readonly rtpDecisionService: RTPDecisionService,
+        private readonly marketStatusService: MarketStatusService,
         @Inject(appConfig.KEY) private readonly config: ConfigType<typeof appConfig>,
     ) {
         this.TIMINGS = {
@@ -127,14 +129,18 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
 
         const isFresh = snapshot && this.priceService.isSnapshotFresh(snapshot, 5);
         const hasEnoughStocks = snapshot && Object.keys(snapshot.symbols || {}).length >= this.config.plinko.stockCount;
+        const isMarketOpen = this.marketStatusService.isMarketOpen(market);
 
-        if (!isFresh || !hasEnoughStocks) {
+        if (!isFresh || !hasEnoughStocks || !isMarketOpen) {
             const stateKey = getPlinkoStateKey(market);
             const rawState = await this.redisService.get(stateKey);
             const state = rawState ? JSON.parse(rawState) : {};
 
             if (state.phase !== GamePhase.PAUSED) {
-                const reason = !isFresh ? 'Market data stale' : 'Insufficient valid stocks';
+                let reason = 'Market data stale';
+                if (!isMarketOpen) reason = 'Market is closed';
+                else if (!hasEnoughStocks) reason = 'Insufficient valid stocks';
+
                 this.logger.warn(`[Circuit Breaker] Market ${market} unstable: ${reason}. Triggering Emergency Stop.`);
 
                 await this.handleEmergencyClose(market);
@@ -164,6 +170,7 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
 
         return true;
     }
+
 
     /**
      * 4-Phase State Machine
