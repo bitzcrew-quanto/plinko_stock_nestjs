@@ -6,7 +6,7 @@ import { MarketsModule } from 'src/markets/markets.module';
 @Module({
     imports: [
         forwardRef(() => RedisModule),
-        MarketsModule
+        forwardRef(() => MarketsModule)
     ],
     providers: [EventsGateway],
     exports: [EventsGateway],

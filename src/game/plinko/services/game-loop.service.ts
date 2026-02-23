@@ -7,6 +7,8 @@ import { PlinkoEngineService } from './plinko-engine';
 import { RedisService } from 'src/redis/redis.service';
 import { HttpService } from 'src/http/http.service';
 import { PlinkoPayoutService } from './plinko-payout';
+import { RTPDecisionService } from './rtp-decision.service';
+import { MarketStatusService } from 'src/markets/market-status.service';
 import { getPlinkoStateKey, getPlinkoRoundBetsKey } from 'src/redis/redis.keys';
 import { v4 as uuidv4 } from 'uuid';
 import { GamePhase, PlinkoGlobalState, StockState } from './../dto/game-state';
@@ -29,6 +31,8 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
         private readonly eventsGateway: EventsGateway,
         private readonly httpService: HttpService,
         private readonly payoutService: PlinkoPayoutService,
+        private readonly rtpDecisionService: RTPDecisionService,
+        private readonly marketStatusService: MarketStatusService,
         @Inject(appConfig.KEY) private readonly config: ConfigType<typeof appConfig>,
     ) {
         this.TIMINGS = {
@@ -124,24 +128,30 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
         const snapshot = await this.priceService.getMarketSnapshot(market);
 
         const isFresh = snapshot && this.priceService.isSnapshotFresh(snapshot, 5);
+        const hasEnoughStocks = snapshot && Object.keys(snapshot.symbols || {}).length >= this.config.plinko.stockCount;
+        const isMarketOpen = this.marketStatusService.isMarketOpen(market);
 
-        if (!isFresh) {
+        if (!isFresh || !hasEnoughStocks || !isMarketOpen) {
             const stateKey = getPlinkoStateKey(market);
             const rawState = await this.redisService.get(stateKey);
             const state = rawState ? JSON.parse(rawState) : {};
 
             if (state.phase !== GamePhase.PAUSED) {
-                this.logger.warn(`[Circuit Breaker] Market ${market} stale. Triggering Emergency Stop.`);
+                let reason = 'Market data stale';
+                if (!isMarketOpen) reason = 'Market is closed';
+                else if (!hasEnoughStocks) reason = 'Insufficient valid stocks';
+
+                this.logger.warn(`[Circuit Breaker] Market ${market} unstable: ${reason}. Triggering Emergency Stop.`);
 
                 await this.handleEmergencyClose(market);
 
                 await this.redisService.set(stateKey, JSON.stringify({
                     phase: GamePhase.PAUSED,
-                    message: 'Market data unstable',
+                    message: reason,
                     nextCheck: Date.now() + 2000
                 }));
 
-                this.eventsGateway.broadcastMarketStatus(market, 'CLOSED', 'Market data unavailable');
+                this.eventsGateway.broadcastMarketStatus(market, 'CLOSED', reason);
             }
             return false;
         }
@@ -160,6 +170,7 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
 
         return true;
     }
+
 
     /**
      * 4-Phase State Machine
@@ -195,10 +206,22 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
                     await this.startBettingPhase(market);
             }
         } else {
-            // Update server time and broadcast to keep clients synced
             state.serverTime = now;
-            // Note: We don't save to Redis every tick to save IO, just broadcast.
-            // But to be safe for failover, we could. For now, just emit.
+
+            if (state.phase !== GamePhase.BETTING) {
+                const snapshot = await this.priceService.getMarketSnapshot(market);
+                if (snapshot) {
+                    state.stocks = state.stocks.map(s => {
+                        const currentPrice = snapshot.symbols[s.symbol]?.price || (s.currentPrice ?? 0);
+                        let delta = 0;
+                        if (s.startPrice && s.startPrice > 0) {
+                            delta = ((currentPrice - s.startPrice) / s.startPrice) * 100;
+                        }
+                        return { ...s, currentPrice, delta };
+                    });
+                }
+            }
+
             this.eventsGateway.server.to(market).emit('game:state', state);
 
             const nextTick = Math.min(timeLeft, 1000);
@@ -296,7 +319,14 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
 
         const stockNames = prevStocks.map(s => s.symbol);
 
-        const results = this.engineService.calculateRoundResults(stockNames, startSnapshot, endSnapshot);
+        // Call RTP-aware engine with all required parameters
+        const results = await this.engineService.calculateRoundResults(
+            market,
+            stockNames,
+            startSnapshot,
+            endSnapshot,
+            this.rtpDecisionService
+        );
 
         const updatedStocks = prevStocks.map(s => {
             const res = results.find(r => r.stockName === s.symbol);
@@ -394,10 +424,36 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
                 if (!Array.isArray(userBets)) userBets = [userBets];
 
                 for (const bet of userBets) {
+                    try {
+                        const sessionKey = `session:${bet.sessionToken}`; // From getKeyForPlayerSession
+                        const rawSession = await this.redisService.get(sessionKey);
+                        let isDemoMode = false;
+
+                        if (rawSession) {
+                            const session = JSON.parse(rawSession);
+                            isDemoMode = session.mode === 'demo';
+
+                            if (isDemoMode) {
+                                const currentBalance = parseFloat(session.currentBalance || '0');
+                                const newBalance = currentBalance + (bet.amount || 0);
+                                session.currentBalance = String(newBalance);
+                                session.updatedAt = new Date().toISOString();
+                                await this.redisService.set(sessionKey, JSON.stringify(session));
+
+                                // Since game-loop doesn't have the socket direct ref, 
+                                // the user will get their balance when they refresh or next bet,
+                                // but we could also broadcast to tenant updates channel if needed.
+                                continue; // Skip HQ step
+                            }
+                        }
+                    } catch (e) {
+                        // Ignore error during demo check, fallback to HQ
+                    }
+
                     await this.httpService.creditWin({
                         sessionToken: bet.sessionToken,
                         winAmount: bet.amount,
-                        currency: 'USD',
+                        currency: bet.currency || 'USD',
                         transactionId: uuidv4(),
                         type: 'refund',
                         metadata: { reason: 'market_outage', originalRound: roundId, originalBetId: bet.transactionId }
