@@ -39,14 +39,41 @@ export class PlinkoPayoutService {
 
         const resultsRaw = await this.redis.get(`plinko:${market}:${roundId}:results`);
         const betsKey = getPlinkoRoundBetsKey(market, roundId);
-        const allBetsMap = await this.redis.getStateClient().hGetAll(betsKey);
 
-        if (!resultsRaw || !allBetsMap || Object.keys(allBetsMap).length === 0) {
+        if (!resultsRaw) {
             await this.redis.del(betsKey);
             return;
         }
 
         const results: PlinkoResult[] = JSON.parse(resultsRaw);
+        const historyKey = getPlinkoMarketHistoryKey(market);
+
+        const topResult = results.reduce((prev, current) =>
+            (prev.multiplier > current.multiplier) ? prev : current
+        );
+
+        const historyEntry = {
+            id: roundId,
+            t: Date.now(),
+            top: { s: topResult.stockName, m: topResult.multiplier },
+            res: results.map(r => ({ s: r.stockName, m: r.multiplier }))
+        };
+
+        const pipe = this.redis.getStateClient().multi();
+        pipe.lPush(historyKey, JSON.stringify(historyEntry));
+        pipe.lTrim(historyKey, 0, 19);
+        await pipe.exec();
+
+        this.events.server.to(market).emit('history_update', historyEntry);
+
+        const allBetsMap = await this.redis.getStateClient().hGetAll(betsKey);
+
+        if (!allBetsMap || Object.keys(allBetsMap).length === 0) {
+            await this.redis.del(betsKey);
+            await this.redis.del(`plinko:${market}:${roundId}:results`);
+            return;
+        }
+
         const stockMultipliers = new Map<string, number>();
         results.forEach(r => stockMultipliers.set(r.stockName, r.multiplier));
 
@@ -55,7 +82,6 @@ export class PlinkoPayoutService {
         let roundTotalWon = 0;
 
         const leaderboardKey = getPlinkoGlobalLeaderboardKey();
-        const historyKey = getPlinkoMarketHistoryKey(market);
 
         for (const [playerId, betsJson] of Object.entries(allBetsMap)) {
             try {
@@ -142,26 +168,8 @@ export class PlinkoPayoutService {
             }
         }
 
-        const topResult = results.reduce((prev, current) =>
-            (prev.multiplier > current.multiplier) ? prev : current
-        );
-
-        const historyEntry = {
-            id: roundId,
-            t: Date.now(),
-            top: { s: topResult.stockName, m: topResult.multiplier },
-            res: results.map(r => ({ s: r.stockName, m: r.multiplier }))
-        };
-
-        const pipe = this.redis.getStateClient().multi();
-        pipe.lPush(historyKey, JSON.stringify(historyEntry));
-        pipe.lTrim(historyKey, 0, 19);
-        await pipe.exec();
-
         const updatedTop25 = await this.redis.getStateClient().zRange(leaderboardKey, 0, 24, { REV: true });
         this.events.server.emit('leaderboard_update', updatedTop25.map(l => JSON.parse(l)));
-
-        this.events.server.to(market).emit('history_update', historyEntry);
 
         if (roundTotalBet > 0) await this.rtpTracker.recordWin(market, roundTotalWon);
 

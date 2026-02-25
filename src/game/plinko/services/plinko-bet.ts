@@ -1,7 +1,7 @@
 import { Inject, Injectable, Logger, BadRequestException, InternalServerErrorException } from '@nestjs/common';
 import { RedisService } from 'src/redis/redis.service';
 import { HttpService } from 'src/http/http.service';
-import { getKeyForPlayerSession, getPlinkoStateKey, getPlinkoRoundBetsKey } from 'src/redis/redis.keys';
+import { getKeyForPlayerSession, getPlinkoStateKey, getPlinkoRoundBetsKey, getPlinkoPlayerHistoryKey } from 'src/redis/redis.keys';
 import { GamePhase } from '../dto/game-state';
 import { AuthenticatedSocket } from 'src/common/types/socket.types';
 import { v4 as uuidv4 } from 'uuid';
@@ -226,6 +226,22 @@ export class PlinkoBetService {
                 this.logger.error(`CRITICAL: Refund failed for ${playerId}, bet ${transactionId}`);
                 throw new InternalServerErrorException('Cancellation failed.');
             }
+        }
+    }
+
+    async getBetHistory(client: AuthenticatedSocket) {
+        const playerId = client.session.tenantPlayerId;
+        const playerHistoryKey = getPlinkoPlayerHistoryKey(playerId);
+
+        try {
+            const historyRaw = await this.redis.getStateClient().lRange(playerHistoryKey, 0, 19);
+            const history = historyRaw.map(entry => JSON.parse(entry));
+
+            client.emit('bet_history', history);
+            return history;
+        } catch (error) {
+            this.logger.error(`Failed to fetch bet history for player ${playerId}: ${error.message}`);
+            throw new InternalServerErrorException('Failed to retrieve bet history');
         }
     }
 }
