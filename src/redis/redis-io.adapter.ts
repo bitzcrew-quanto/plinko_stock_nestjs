@@ -74,7 +74,7 @@ export class RedisIoAdapter extends IoAdapter {
             this.subClient.on('end', () => this.logger.warn('Socket.IO Redis sub connection ended'));
 
             await Promise.all([this.pubClient.connect(), this.subClient.connect()]);
-            this.adapterConstructor = createAdapter(this.pubClient, this.subClient);
+            this.adapterConstructor = createAdapter(this.pubClient, this.subClient,{key:"plinko"});
             this.logger.log('Socket.IO adapter connected to Redis successfully.');
             this.healthy = true;
         } catch (err) {
