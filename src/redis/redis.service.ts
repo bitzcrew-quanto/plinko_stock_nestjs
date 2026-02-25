@@ -6,7 +6,7 @@ import { EventsGateway } from 'src/events/events.gateway';
 import { DeltaWorkerService } from 'src/workers/delta.service';
 import { BalanceUpdateService } from './balance-update.service';
 import type { Market, MarketDataPayload } from './dto/market-data.dto';
-import { getKeyForLastMarketSnapshot } from './redis.keys';
+import { getKeyForLastMarketSnapshot, getKeyForGameValidStocks, getGameRefetchChannel } from './redis.keys';
 
 export type UniversalRedisClient = RedisClientType | RedisClusterType;
 type RedisConfig = ConfigType<typeof appConfig>['pubsubRedis'];
@@ -19,6 +19,7 @@ export class RedisService implements OnModuleDestroy, OnModuleInit {
   private stateSubscriber!: UniversalRedisClient;
 
   private readonly lastPayloadByMarket: Record<string, MarketDataPayload> = Object.create(null);
+  private readonly validStocksByMarket: Record<string, Set<string>> = {};
 
   private subscriberReady = false;
   private stateSubscriberReady = false;
@@ -99,6 +100,7 @@ export class RedisService implements OnModuleDestroy, OnModuleInit {
       this.clientReady = true;
       this.logger.log('Redis clients connected successfully.');
       await this.subscribeToChannels();
+      await this.subscribeToGameChannels();
     } catch (error) {
       this.logger.error(
         'Failed to connect Redis clients on startup. Service will continue and retry on demand.',
@@ -297,8 +299,75 @@ export class RedisService implements OnModuleDestroy, OnModuleInit {
       : payload;
   }
 
+  private async fetchValidStocks() {
+    const channels = this.config.subscribeChannels;
+    for (const channel of channels) {
+      this.validStocksByMarket[channel] = new Set<string>();
+      const cacheKey = getKeyForGameValidStocks(this.config.gamePublicId, channel);
+
+      try {
+        let cached: string | null = null;
+        try {
+          cached = await (this.client).get(cacheKey);
+        } catch (err) {
+          this.logger.warn(`Failed to read stock cache for market '${channel}': ${err}`);
+        }
+
+        if (cached) {
+          try {
+            const cachedSymbols = JSON.parse(cached);
+            if (Array.isArray(cachedSymbols)) {
+              this.validStocksByMarket[channel] = new Set(cachedSymbols);
+              this.logger.log(`Loaded ${cachedSymbols.length} valid stocks for market '${channel}' from Redis Cache`);
+              continue;
+            }
+          } catch (e) {
+            this.logger.warn(`Invalid cached data for ${channel}, falling back to HQ`);
+          }
+        }
+
+        const url = `${this.config.hqServiceUrl}/api/stocks?market=${channel}&gameId=${this.config.gamePublicId}&limit=10`;
+        this.logger.log(`Fetching stocks for market '${channel}' from ${url}`);
+
+        const response = await fetch(url);
+        if (!response.ok) {
+          this.logger.warn(`Failed to fetch stocks for market '${channel}': ${response.statusText}`);
+          continue;
+        }
+
+        const json = await response.json();
+        this.logger.debug(`HQ Response for ${channel}: ${JSON.stringify(json)}`);
+
+        if (json.success && Array.isArray(json.data)) {
+          const symbolsSet = new Set<string>();
+          for (const stock of json.data) {
+            if (stock.symbol) symbolsSet.add(stock.symbol);
+          }
+
+          this.validStocksByMarket[channel] = symbolsSet;
+          this.logger.log(`Loaded ${symbolsSet.size} valid stocks for market '${channel}' from HQ`);
+
+          try {
+            const uniqueSymbols = Array.from(symbolsSet);
+            await (this.client).set(cacheKey, JSON.stringify(uniqueSymbols), { EX: 600 });
+          } catch (err) {
+            this.logger.warn(`Failed to cache stocks for ${channel}: ${err}`);
+          }
+
+        } else {
+          this.logger.warn(`Invalid response format from HQ for market '${channel}'`);
+        }
+
+      } catch (error) {
+        this.logger.error(`Error fetching stocks for market '${channel}'`, error);
+      }
+    }
+  }
+
   private async subscribeToChannels() {
     try {
+      await this.fetchValidStocks();
+
       const channels = this.config.subscribeChannels;
 
       await (this.subscriber as any).subscribe(
@@ -306,17 +375,41 @@ export class RedisService implements OnModuleDestroy, OnModuleInit {
         (message: string, channel: string) => {
           try {
             const parsed = JSON.parse(message);
-            const stockList = parsed.symbols ? Object.keys(parsed.symbols).join(', ') : 'No stocks';
-            this.logger.log(`Received market snapshot for ${channel} | Stocks: ${stockList}`);
             const room = channel;
             const previous = this.lastPayloadByMarket[room];
-            const current: MarketDataPayload = { ...(parsed as any), market: room } as unknown as MarketDataPayload;
+
+            // Filter symbols based on valid stocks for this market
+            let currentPayload = parsed;
+            const validStocks = this.validStocksByMarket[room];
+
+            if (validStocks && currentPayload.symbols) {
+              const beforeCount = Object.keys(currentPayload.symbols).length;
+
+              const filteredSymbols: any = {};
+              let keptCount = 0;
+              for (const [key, val] of Object.entries(currentPayload.symbols)) {
+                if (validStocks.has(key)) {
+                  filteredSymbols[key] = val;
+                  keptCount++;
+                }
+              }
+              currentPayload = { ...currentPayload, symbols: filteredSymbols };
+            }
+
+            // If after filtering we have no stocks left, don't emit an empty snapshot.
+            if (currentPayload.symbols && Object.keys(currentPayload.symbols).length === 0) {
+              return;
+            }
+
+            const stockList = currentPayload.symbols ? Object.keys(currentPayload.symbols).join(', ') : 'No stocks';
+            this.logger.log(`Received market snapshot for ${channel} | Stocks: ${stockList}`);
+
+            const current: MarketDataPayload = { ...(currentPayload as any), market: room } as unknown as MarketDataPayload;
 
             this.deltaWorker.enrichWithDelta(current, previous)
               .then((enriched) => {
                 let outbound: MarketDataPayload = 'error' in enriched ? current : enriched;
 
-                // Apply any forced deltas (e.g. from game logic mines)
                 outbound = this.applyForcedDeltas(outbound);
 
                 this.lastPayloadByMarket[room] = outbound;
@@ -392,6 +485,36 @@ export class RedisService implements OnModuleDestroy, OnModuleInit {
       const message = err instanceof Error ? err.message : String(err);
       this.logger.error(`Failed to subscribe to tenant channels on STATE Redis. ${message}`);
       this.lastSubscribeError = message;
+    }
+  }
+
+  private async subscribeToGameChannels(): Promise<void> {
+    try {
+      if (!this.stateSubscriber) {
+        this.logger.error('Redis state subscriber not available for game channels');
+        return;
+      }
+      const channel = getGameRefetchChannel(this.config.gamePublicId);
+      await (this.stateSubscriber).subscribe(
+        channel,
+        async (message: string) => {
+          try {
+            this.logger.log(`Received ${channel} signal. Clearing cache and refetching stocks...`);
+
+            for (const market of this.config.subscribeChannels) {
+              const key = getKeyForGameValidStocks(this.config.gamePublicId, market);
+              await (this.client).del(key);
+            }
+
+            await this.fetchValidStocks();
+          } catch (e) {
+            this.logger.error(`Error processing ${channel} message`, e);
+          }
+        }
+      );
+      this.logger.log(`Subscribed to game refetch channel: ${channel}`);
+    } catch (err) {
+      this.logger.error('Failed to subscribe to game channels', err);
     }
   }
 
@@ -513,6 +636,7 @@ export class RedisService implements OnModuleDestroy, OnModuleInit {
       this.logger.log('Attempting to reconnect Redis State Subscriber...');
       await (this.stateSubscriber).connect();
       await this.subscribeToTenantChannels();
+      await this.subscribeToGameChannels();
       this.stateSubscriberReady = true;
       this.logger.log('Redis State Subscriber reconnected successfully');
     } catch (error) {

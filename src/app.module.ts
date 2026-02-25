@@ -3,6 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import appConfig from './config/app.config';
+import { validationSchema } from './config/validation.schema';
 import { RedisModule } from './redis/redis.module';
 import { EventsModule } from './events/events.module';
 import { MarketsModule } from './markets/markets.module';
@@ -13,6 +14,7 @@ import { HttpModule } from './http/http.module';
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
+      validationSchema,
       load: [appConfig],
     }),
     RedisModule,
