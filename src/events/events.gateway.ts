@@ -80,10 +80,10 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
                 return;
             }
 
-            const convertedBalance = convertBalance(client.session.currentBalance, client.session.currency.conversionRateToBase);
+            // const convertedBalance = convertBalance(client.session.currentBalance, client.session.currency.conversionRateToBase);
 
             client.emit('updated_balance', {
-                playerUpdatedBalance: convertedBalance,
+                playerUpdatedBalance: client.session.currentBalance,
                 currency: {
                     name: client.session.currency.name,
                     symbol: client.session.currency.symbol,
