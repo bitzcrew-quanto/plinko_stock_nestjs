@@ -14,7 +14,6 @@ import { RedisService } from 'src/redis/redis.service';
 import { BalanceUpdateService } from 'src/redis/balance-update.service';
 import { MarketStatusService } from 'src/markets/market-status.service';
 import { getKeyForPlayerSession, getKeyForLastMarketSnapshot, getPlinkoStateKey, getPlinkoRoundBetsKey, getPlinkoGlobalLeaderboardKey, getPlinkoMarketHistoryKey } from 'src/redis/redis.keys';
-import { convertBalance } from 'src/common/utils/currency';
 
 @WebSocketGateway({
     cors: {

@@ -49,4 +49,13 @@ export class PlinkoGateway {
             client.emit('error', { type: 'cancel_error', message: error.message });
         }
     }
+
+    @SubscribeMessage('bet_history')
+    async handleGetBetHistory(@ConnectedSocket() client: AuthenticatedSocket) {
+        try {
+            return await this.betService.getBetHistory(client);
+        } catch (error) {
+            client.emit('error', { type: 'history_error', message: error.message });
+        }
+    }
 }
