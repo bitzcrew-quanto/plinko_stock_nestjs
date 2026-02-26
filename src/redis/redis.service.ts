@@ -326,7 +326,7 @@ export class RedisService implements OnModuleDestroy, OnModuleInit {
           }
         }
 
-        const url = `${this.config.hqServiceUrl}/api/stocks?market=${channel}&gameId=${this.config.gamePublicId}&limit=10`;
+        const url = `${this.config.hqServiceUrl}/api/stocks?market=${channel}&gameId=${this.config.gamePublicId}&limit=55`;
         this.logger.log(`Fetching stocks for market '${channel}' from ${url}`);
 
         const response = await fetch(url);
