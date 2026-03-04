@@ -222,7 +222,7 @@ export class PlinkoPayoutService {
                 winAmount: winAmount,
                 currency,
                 transactionId: uuidv4(),
-                type: 'win',
+                type: 'credit',
                 metadata: { game: 'plinko', wagerTxId: bet.transactionId }
             });
 

@@ -24,7 +24,7 @@ export interface HqCreditRequest {
     transactionId: string;
     playerId?: string;
     tenantId?: string;
-    type?: 'win' | 'refund';
+    type?: 'credit' | 'debit' | 'refund';
     metadata?: any;
 }
 
