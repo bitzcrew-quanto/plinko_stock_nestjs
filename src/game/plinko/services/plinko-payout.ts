@@ -212,6 +212,8 @@ export class PlinkoPayoutService {
                 currency: typeof bet.currency === 'string' ? bet.currency : (bet.currency as any)?.name || 'USD',
                 transactionId: uuidv4(),
                 type: 'win',
+                playerId: bet.playerId,
+                tenantId: bet.tenantId,
                 metadata: { game: 'plinko', wagerTxId: bet.transactionId }
             });
         } catch (e) {
