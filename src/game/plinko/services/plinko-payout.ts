@@ -120,8 +120,15 @@ export class PlinkoPayoutService {
                         payout: Number(betWin.toFixed(2)),
                         multiplier: Number(currentMultiplier.toFixed(2))
                     });
+                }
 
-                    if (betWin > 0) payoutPromises.push(this.creditPlayer(bet, betWin, playerId, tenantId));
+                if (totalPayout > 0 && userBets.length > 0) {
+                    const aggregateBet = {
+                        ...userBets[0],
+                        amount: totalWager,
+                        transactionId: userBets.map((b: any) => b.transactionId).join(',')
+                    };
+                    payoutPromises.push(this.creditPlayer(aggregateBet, totalPayout, playerId, tenantId));
                 }
 
                 roundTotalBet += totalWager;
