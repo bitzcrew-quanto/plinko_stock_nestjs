@@ -120,8 +120,15 @@ export class PlinkoPayoutService {
                         payout: Number(betWin.toFixed(2)),
                         multiplier: Number(currentMultiplier.toFixed(2))
                     });
+                }
 
-                    if (betWin > 0) payoutPromises.push(this.creditPlayer(bet, betWin));
+                if (totalPayout > 0 && userBets.length > 0) {
+                    const aggregateBet = {
+                        ...userBets[0],
+                        amount: totalWager,
+                        transactionId: userBets.map((b: any) => b.transactionId).join(',')
+                    };
+                    payoutPromises.push(this.creditPlayer(aggregateBet, totalPayout, playerId, tenantId));
                 }
 
                 roundTotalBet += totalWager;
@@ -181,23 +188,33 @@ export class PlinkoPayoutService {
         this.logger.log(`Payouts completed for ${market}:${roundId}`);
     }
 
-    private async creditPlayer(bet: any, winAmount: number) {
+    private async creditPlayer(bet: any, winAmount: number, playerId: string, tenantId: string) {
+        const currency = typeof bet.currency === 'string' ? bet.currency : (bet.currency as any)?.name || 'USD';
+
+        // --- DEMO MODE ---
         try {
             const sessionKey = getKeyForPlayerSession(bet.sessionToken);
             const rawSession = await this.redis.get(sessionKey);
-            let isDemoMode = false;
 
             if (rawSession) {
                 const session = JSON.parse(rawSession);
-                isDemoMode = session.mode === 'demo';
 
-                if (isDemoMode) {
+                if (session.mode === 'demo') {
                     const currentBalance = parseFloat(session.currentBalance || '0');
                     const newBalance = currentBalance + winAmount;
                     session.currentBalance = String(newBalance);
                     session.updatedAt = new Date().toISOString();
                     await this.redis.set(sessionKey, JSON.stringify(session));
-                    // Return early to skip HQ
+
+                    // Emit updated balance to the player (demo)
+                    if (tenantId && playerId) {
+                        const room = this.balanceService.getPlayerBalanceRoom(tenantId, playerId);
+                        this.events.emitBalanceUpdateToPlayerRoom(room, {
+                            playerId,
+                            balance: newBalance,
+                            currency,
+                        });
+                    }
                     return;
                 }
             }
@@ -205,17 +222,28 @@ export class PlinkoPayoutService {
             // Ignore session read error, fallback to HQ
         }
 
+        // --- LIVE MODE ---
         try {
-            await this.http.creditWin({
+            const response = await this.http.creditWin({
                 sessionToken: bet.sessionToken,
                 winAmount: winAmount,
-                currency: typeof bet.currency === 'string' ? bet.currency : (bet.currency as any)?.name || 'USD',
+                currency,
                 transactionId: uuidv4(),
-                type: 'win',
+                type: 'credit',
                 metadata: { game: 'plinko', wagerTxId: bet.transactionId }
             });
+
+            // Emit authoritative balance update back to the player
+            if (response?.data?.newBalance !== undefined && tenantId && playerId) {
+                const room = this.balanceService.getPlayerBalanceRoom(tenantId, playerId);
+                this.events.emitBalanceUpdateToPlayerRoom(room, {
+                    playerId,
+                    balance: response.data.newBalance,
+                    currency,
+                });
+            }
         } catch (e) {
-            this.logger.error(`Failed to credit ${bet.playerId}: ${e.message}`);
+            this.logger.error(`Failed to credit ${playerId}: ${e.message}`);
         }
     }
 }
