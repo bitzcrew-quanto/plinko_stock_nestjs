@@ -208,14 +208,19 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
         } else {
             state.serverTime = now;
 
-            if (state.phase !== GamePhase.BETTING) {
+            if (state.phase === GamePhase.ACCUMULATION) {
                 const snapshot = await this.priceService.getMarketSnapshot(market);
                 if (snapshot) {
                     state.stocks = state.stocks.map(s => {
                         const currentPrice = snapshot.symbols[s.symbol]?.price || (s.currentPrice ?? 0);
                         let delta = 0;
                         if (s.startPrice && s.startPrice > 0) {
-                            delta = ((currentPrice - s.startPrice) / s.startPrice) * 100;
+                            const rawDeltaPercent = ((currentPrice - s.startPrice) / s.startPrice) * 100;
+                            delta = Number(rawDeltaPercent.toFixed(2));
+
+                            if (delta === 0 && currentPrice !== s.startPrice) {
+                                delta = currentPrice > s.startPrice ? 0.01 : -0.01;
+                            }
                         }
                         return { ...s, currentPrice, delta };
                     });

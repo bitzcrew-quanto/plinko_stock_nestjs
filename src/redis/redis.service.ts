@@ -6,7 +6,7 @@ import { EventsGateway } from 'src/events/events.gateway';
 import { DeltaWorkerService } from 'src/workers/delta.service';
 import { BalanceUpdateService } from './balance-update.service';
 import type { Market, MarketDataPayload } from './dto/market-data.dto';
-import { getKeyForLastMarketSnapshot, getKeyForGameValidStocks, getGameRefetchChannel } from './redis.keys';
+import { getKeyForLastMarketSnapshot, getKeyForGameValidStocks, getGameRefetchChannel, getPlinkoStateKey } from './redis.keys';
 
 export type UniversalRedisClient = RedisClientType | RedisClusterType;
 type RedisConfig = ConfigType<typeof appConfig>['pubsubRedis'];
@@ -372,11 +372,24 @@ export class RedisService implements OnModuleDestroy, OnModuleInit {
 
       await (this.subscriber as any).subscribe(
         channels,
-        (message: string, channel: string) => {
+        async (message: string, channel: string) => {
           try {
             const parsed = JSON.parse(message);
             const room = channel;
-            const previous = this.lastPayloadByMarket[room];
+
+            // Get base_snap for cumulative delta
+            let previous = this.lastPayloadByMarket[room];
+            const stateKey = getPlinkoStateKey(room);
+            const rawState = await this.client.get(stateKey);
+            if (rawState) {
+              const state = JSON.parse(rawState);
+              if (state.roundId) {
+                const baseSnapRaw = await this.client.get(`plinko:${room}:${state.roundId}:base_snap`);
+                if (baseSnapRaw) {
+                  previous = JSON.parse(baseSnapRaw) as MarketDataPayload;
+                }
+              }
+            }
 
             // Filter symbols based on valid stocks for this market
             let currentPayload = parsed;
@@ -577,7 +590,11 @@ export class RedisService implements OnModuleDestroy, OnModuleInit {
           : nowSec;
 
         const rawDelta = previousPrice !== null ? price - previousPrice : 0;
-        let delta = Number(rawDelta.toFixed(2));
+        let delta = 0;
+
+        if (previousPrice && previousPrice > 0) {
+          delta = Number(((rawDelta / previousPrice) * 100).toFixed(2));
+        }
 
         if (delta === 0 && rawDelta !== 0) {
           delta = rawDelta > 0 ? 0.01 : -0.01;
