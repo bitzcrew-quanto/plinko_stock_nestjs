@@ -111,7 +111,11 @@ parentPort?.on('message', (raw: unknown) => {
                 previousPrice !== null && Number.isFinite(price)
                     ? price - previousPrice
                     : 0;
-            let delta = Number(rawDelta.toFixed(2));
+            let delta = 0;
+
+            if (previousPrice && previousPrice > 0) {
+                delta = Number(((rawDelta / previousPrice) * 100).toFixed(2));
+            }
 
             // Force minimum visibility for tiny changes
             if (delta === 0 && rawDelta !== 0) {
