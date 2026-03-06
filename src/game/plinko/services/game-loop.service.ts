@@ -12,6 +12,7 @@ import { MarketStatusService } from 'src/markets/market-status.service';
 import { getPlinkoStateKey, getPlinkoRoundBetsKey } from 'src/redis/redis.keys';
 import { v4 as uuidv4 } from 'uuid';
 import { GamePhase, PlinkoGlobalState, StockState } from './../dto/game-state';
+import { BalanceUpdateService } from 'src/redis/balance-update.service';
 import * as os from 'os';
 
 
@@ -33,6 +34,7 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
         private readonly payoutService: PlinkoPayoutService,
         private readonly rtpDecisionService: RTPDecisionService,
         private readonly marketStatusService: MarketStatusService,
+        private readonly balanceUpdateService: BalanceUpdateService,
         @Inject(appConfig.KEY) private readonly config: ConfigType<typeof appConfig>,
     ) {
         this.TIMINGS = {
@@ -406,11 +408,10 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
         if (state.phase === GamePhase.BETTING || state.phase === GamePhase.ACCUMULATION || state.phase === GamePhase.DROPPING) {
             this.logger.warn(`[Emergency] Cancelling Round ${state.roundId} on ${market}. Refunding bets.`);
 
-            this.eventsGateway.server.to(market).emit('game:error', {
+            this.eventsGateway.server.to(market).emit('error', {
                 code: 'ROUND_CANCELLED',
                 message: 'Round cancelled due to market instability. Bets refunded.'
             });
-
             await this.triggerRefunds(market, state.roundId);
         }
     }
@@ -453,9 +454,14 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
                                 session.updatedAt = new Date().toISOString();
                                 await this.redisService.set(sessionKey, JSON.stringify(session));
 
-                                // Since game-loop doesn't have the socket direct ref, 
-                                // the user will get their balance when they refresh or next bet,
-                                // but we could also broadcast to tenant updates channel if needed.
+                                const tenantId = bet.tenantId || session.tenantPublicId || session.tenantId;
+                                const room = this.balanceUpdateService.getPlayerBalanceRoom(tenantId, playerId);
+                                this.eventsGateway.emitBalanceUpdateToPlayerRoom(room, {
+                                    playerId,
+                                    balance: newBalance,
+                                    currency: bet.currency || 'USD'
+                                });
+
                                 continue; // Skip HQ step
                             }
                         }
@@ -463,7 +469,7 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
                         // Ignore error during demo check, fallback to HQ
                     }
 
-                    await this.httpService.creditWin({
+                    const refundTx = await this.httpService.creditWin({
                         sessionToken: bet.sessionToken,
                         winAmount: bet.amount,
                         currency: bet.currency || 'USD',
@@ -471,6 +477,18 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
                         type: 'refund',
                         metadata: { reason: 'market_outage', originalRound: roundId, originalBetId: bet.transactionId }
                     });
+
+                    if (refundTx?.data?.newBalance !== undefined) {
+                        const tenantId = bet.tenantId;
+                        if (tenantId) {
+                            const room = this.balanceUpdateService.getPlayerBalanceRoom(tenantId, playerId);
+                            this.eventsGateway.emitBalanceUpdateToPlayerRoom(room, {
+                                playerId,
+                                balance: refundTx.data.newBalance,
+                                currency: bet.currency || 'USD'
+                            });
+                        }
+                    }
                 }
 
             } catch (err) {
