@@ -6,7 +6,7 @@ import { EventsGateway } from 'src/events/events.gateway';
 import { DeltaWorkerService } from 'src/workers/delta.service';
 import { BalanceUpdateService } from './balance-update.service';
 import type { MarketDataPayload } from './dto/market-data.dto';
-import { getKeyForLastMarketSnapshot, getKeyForGameValidStocks, getGameRefetchChannel, getPlinkoStateKey,getGameConfigKey } from './redis.keys';
+import { getKeyForLastMarketSnapshot, getKeyForGameValidStocks, getGameRefetchChannel, getPlinkoStateKey, getGameConfigKey } from './redis.keys';
 import { HttpService } from '../http/http.service';
 
 export type UniversalRedisClient = RedisClientType | RedisClusterType;
@@ -406,10 +406,17 @@ export class RedisService implements OnModuleDestroy, OnModuleInit {
             const parsed = JSON.parse(message);
             const room = channel;
 
-            // Get base_snap for cumulative delta
-            let previous = this.lastPayloadByMarket[room];
             const stateKey = getPlinkoStateKey(room);
             const rawState = await this.client.get(stateKey);
+
+            if (rawState) {
+              const state = JSON.parse(rawState);
+              if (state.phase === 'DROPPING' || state.phase === 'PAYOUT') {
+                return;
+              }
+            }
+
+            let previous = this.lastPayloadByMarket[room];
             if (rawState) {
               const state = JSON.parse(rawState);
               if (state.roundId) {
