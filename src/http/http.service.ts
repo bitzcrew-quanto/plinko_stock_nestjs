@@ -109,4 +109,32 @@ export class HttpService {
         }
         throw new Error(`Failed to communicate: ${error.message}`);
     }
+    async fetchGameConfig(market: string): Promise<any> {
+        try {
+            const apiPath = `/api/games/${this.config.gamePublicId}/config`;
+            const url = `${this.config.hqServiceUrl}${apiPath}?market=${market}`;
+            this.logger.log(`Fetching game config and stocks for market '${market}' from ${url}`);
+
+            const timestamp = Date.now().toString();
+            const signature = createSignature({
+                method: 'GET',
+                path: apiPath,
+                body: {},
+                timestamp
+            }, this.config.signatureSecret);
+
+            const response = await this.getClient().get(url, {
+                timeout: this.config.hqServiceTimeout,
+                headers: {
+                    'x-timestamp': timestamp,
+                    'x-signature': signature
+                }
+            });
+
+            return response.data;
+        } catch (error) {
+            this.logger.error(`Failed to fetch game config for market '${market}': ${error.message}`);
+            throw error;
+        }
+    }
 }

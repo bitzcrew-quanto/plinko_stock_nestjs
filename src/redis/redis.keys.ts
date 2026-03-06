@@ -15,7 +15,8 @@ export const getKeyForGameValidStocks = (gameId: string, market: string): string
     `game:${gameId}:valid_stocks:${market}`;
 
 export const getGameRefetchChannel = (gameId: string): string =>
-    `game:${gameId}:refetch_stocks`;
+    // `game:${gameId}:refetch_stocks`;
+    `game:${gameId}:refetch`;
 
 export const getMarketConfigsKey = (): string => {
     return 'markets';
@@ -82,3 +83,6 @@ export const getPlinkoMarketBaselinesKey = (market: string): string => {
     const safe = market.toLowerCase();
     return `plinko:${safe}:baselines`;
 };
+export const getGameConfigKey = (gamePublicId: string): string => {
+    return `game:config:${gamePublicId}`;
+}

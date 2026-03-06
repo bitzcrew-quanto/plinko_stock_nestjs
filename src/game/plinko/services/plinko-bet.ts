@@ -58,7 +58,50 @@ export class PlinkoBetService {
 
         if (!amount || amount <= 0) throw new BadRequestException('Invalid amount');
         if (!stocks || stocks.length === 0 || stocks.length > this.config.plinko.stockCount) throw new BadRequestException('Invalid stock selection');
+        try {
+            const betKey = getPlinkoRoundBetsKey(market, state.roundId);
+            const map = await this.redis.hGetAll(betKey);
 
+            let totalBets = 0;
+
+            const playerRaw = map[playerId];
+
+            if (playerRaw) {
+                try {
+                    const bets = JSON.parse(playerRaw) as Array<{ amount: number }>;
+                    for (const bet of bets) {
+                        totalBets += Number(bet.amount || 0);
+                    }
+                } catch { }
+            }
+
+            const newTotalAmount = totalBets + amount;
+
+            const maxBetLimit = this.redis.gameConfig?.maxBetLimit;
+            this.logger.debug(`gameConfig: ${JSON.stringify(this.redis.gameConfig)}, maxBetLimit: ${maxBetLimit}, newTotalAmount: ${newTotalAmount}`);
+            if (typeof maxBetLimit === 'number' && maxBetLimit > 0) {
+                if (newTotalAmount > maxBetLimit) {
+                    let displayTotalAmount = newTotalAmount;
+                    let displayMaxLimit = maxBetLimit;
+                    let prefix = '';
+
+                    if (client.session.currency && typeof client.session.currency === 'object') {
+                        const rate = parseFloat(client.session.currency.conversionRateToBase || '1');
+                        if (!isNaN(rate) && rate > 0) {
+                            displayTotalAmount = Number((newTotalAmount / rate).toFixed(2));
+                            displayMaxLimit = Number((maxBetLimit / rate).toFixed(2));
+                        }
+                        if (client.session.currency.symbol) {
+                            prefix = client.session.currency.symbol;
+                        } else if (client.session.currency.name) {
+                            prefix = client.session.currency.name + ' ';
+                        }
+                    }
+
+                    return { error: `Total bet amount (${prefix}${displayTotalAmount}) exceeds maximum limit (${prefix}${displayMaxLimit})` };
+                }
+            }
+        } catch { /* ignore parse error */ }
 
         const transactionId = uuidv4();
         const isDemoMode = client.session.mode === 'demo';
