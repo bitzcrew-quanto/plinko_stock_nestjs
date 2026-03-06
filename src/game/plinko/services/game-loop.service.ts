@@ -125,6 +125,16 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
      * Circuit Breaker: Pauses game and refunds bets if data is stale.
      */
     private async checkMarketHealth(market: string): Promise<boolean> {
+        const stateKey = getPlinkoStateKey(market);
+        const rawState = await this.redisService.get(stateKey);
+        const state = rawState ? JSON.parse(rawState) : {};
+
+        // If the game is in DROPPING or PAYOUT, the prices are already locked.
+        // We do not need fresh market data to finish the round natively!
+        if (state.phase === GamePhase.DROPPING || state.phase === GamePhase.PAYOUT) {
+            return true;
+        }
+
         const snapshot = await this.priceService.getMarketSnapshot(market);
 
         const isFresh = snapshot && this.priceService.isSnapshotFresh(snapshot, 5);
@@ -155,10 +165,6 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
             }
             return false;
         }
-
-        const stateKey = getPlinkoStateKey(market);
-        const rawState = await this.redisService.get(stateKey);
-        const state = rawState ? JSON.parse(rawState) : {};
 
         if (state.phase === GamePhase.PAUSED) {
             this.logger.log(`[Circuit Breaker] Market ${market} recovered. Resuming.`);
@@ -396,8 +402,8 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
 
         const state = JSON.parse(rawState);
 
-        // Only refund if bets were active (Betting or Accumulation phase)
-        if (state.phase === GamePhase.BETTING || state.phase === GamePhase.ACCUMULATION) {
+        // Only refund if bets were active (Betting, Accumulation, or Dropping phase)
+        if (state.phase === GamePhase.BETTING || state.phase === GamePhase.ACCUMULATION || state.phase === GamePhase.DROPPING) {
             this.logger.warn(`[Emergency] Cancelling Round ${state.roundId} on ${market}. Refunding bets.`);
 
             this.eventsGateway.server.to(market).emit('game:error', {
@@ -421,9 +427,11 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
             try {
                 let userBets: any[] = [];
                 try {
-                    userBets = JSON.parse(betJson);
+                    const parsed = JSON.parse(betJson);
+                    userBets = Array.isArray(parsed) ? parsed : [parsed];
                 } catch {
-                    userBets = [JSON.parse(betJson)];
+                    this.logger.error(`Failed to parse bet JSON for player ${playerId}: ${betJson}`);
+                    continue;
                 }
 
                 if (!Array.isArray(userBets)) userBets = [userBets];
