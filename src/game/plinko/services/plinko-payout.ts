@@ -1,4 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import type { ConfigType } from '@nestjs/config';
+import appConfig from 'src/config/app.config';
 import { RedisService } from 'src/redis/redis.service';
 import { HttpService } from 'src/http/http.service';
 import { EventsGateway } from 'src/events/events.gateway';
@@ -32,6 +34,7 @@ export class PlinkoPayoutService {
         private readonly events: EventsGateway,
         private readonly balanceService: BalanceUpdateService,
         private readonly rtpTracker: RTPTrackerService,
+        @Inject(appConfig.KEY) private readonly config: ConfigType<typeof appConfig>,
     ) { }
 
     async processRoundPayouts(market: string, roundId: string) {
@@ -80,6 +83,8 @@ export class PlinkoPayoutService {
         const payoutPromises: Promise<void>[] = [];
         let roundTotalBet = 0;
         let roundTotalWon = 0;
+        let roundTotalLost = 0;
+        let playerCount = 0;
 
         const leaderboardKey = getPlinkoGlobalLeaderboardKey();
 
@@ -133,6 +138,8 @@ export class PlinkoPayoutService {
 
                 roundTotalBet += totalWager;
                 roundTotalWon += totalPayout;
+                roundTotalLost += Math.max(0, totalWager - totalPayout);
+                playerCount++;
 
                 if (totalPayout > 0) {
                     const leaderData = JSON.stringify({
@@ -181,6 +188,47 @@ export class PlinkoPayoutService {
         if (roundTotalBet > 0) await this.rtpTracker.recordWin(market, roundTotalWon);
 
         await Promise.allSettled(payoutPromises);
+
+        // Send end-round report to HQ (like Wheel of Fortune)
+        try {
+            const startSnapRaw = await this.redis.get(`plinko:${market}:${roundId}:start_snap`);
+            const startSnapshot = startSnapRaw ? JSON.parse(startSnapRaw) : null;
+
+            const opening: Record<string, number> = {};
+            const closing: Record<string, number> = {};
+            for (const r of results) {
+                opening[r.stockName] = r.startPrice;
+                closing[r.stockName] = r.endPrice;
+            }
+
+            this.http.endRound({
+                gameId: this.config.gamePublicId,
+                roundId,
+                market,
+                startTime: startSnapshot?.timestamp
+                    ? new Date(startSnapshot.timestamp).toISOString()
+                    : new Date(Date.now() - 60000).toISOString(),
+                endTime: new Date().toISOString(),
+                metadata: {
+                    opening,
+                    closing,
+                    results: results.map(r => ({
+                        stock: r.stockName,
+                        deltaPercent: r.deltaPercent,
+                        multiplier: r.multiplier,
+                        multiplierIndex: r.multiplierIndex,
+                    })),
+                    stats: {
+                        totalBet: Number(roundTotalBet.toFixed(2)),
+                        totalWin: Number(roundTotalWon.toFixed(2)),
+                        totalLost: Number(roundTotalLost.toFixed(2)),
+                        playerCount,
+                    },
+                },
+            }).catch(err => this.logger.error(`Failed to report round end: ${err.message}`));
+        } catch (err) {
+            this.logger.error(`Failed to build endRound payload: ${err.message}`);
+        }
 
         await this.redis.del(betsKey);
         await this.redis.del(`plinko:${market}:${roundId}:results`);
