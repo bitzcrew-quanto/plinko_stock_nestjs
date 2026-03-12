@@ -36,3 +36,12 @@ export interface HqCreditResponse {
         message?: string;
     }
 }
+
+export interface HqEndRoundRequest {
+    gameId: string;
+    roundId: string;
+    market: string;
+    startTime: string;
+    endTime: string;
+    metadata?: any;
+}
