@@ -24,7 +24,7 @@ export interface HqCreditRequest {
     transactionId: string;
     playerId?: string;
     tenantId?: string;
-    type?: 'win' | 'refund';
+    type?: 'credit' | 'debit' | 'refund';
     metadata?: any;
 }
 
@@ -35,4 +35,13 @@ export interface HqCreditResponse {
         newBalance: number;
         message?: string;
     }
+}
+
+export interface HqEndRoundRequest {
+    gameId: string;
+    roundId: string;
+    market: string;
+    startTime: string;
+    endTime: string;
+    metadata?: any;
 }

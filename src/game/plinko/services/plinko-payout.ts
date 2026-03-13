@@ -1,4 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import type { ConfigType } from '@nestjs/config';
+import appConfig from 'src/config/app.config';
 import { RedisService } from 'src/redis/redis.service';
 import { HttpService } from 'src/http/http.service';
 import { EventsGateway } from 'src/events/events.gateway';
@@ -32,6 +34,7 @@ export class PlinkoPayoutService {
         private readonly events: EventsGateway,
         private readonly balanceService: BalanceUpdateService,
         private readonly rtpTracker: RTPTrackerService,
+        @Inject(appConfig.KEY) private readonly config: ConfigType<typeof appConfig>,
     ) { }
 
     async processRoundPayouts(market: string, roundId: string) {
@@ -80,6 +83,8 @@ export class PlinkoPayoutService {
         const payoutPromises: Promise<void>[] = [];
         let roundTotalBet = 0;
         let roundTotalWon = 0;
+        let roundTotalLost = 0;
+        let playerCount = 0;
 
         const leaderboardKey = getPlinkoGlobalLeaderboardKey();
 
@@ -120,12 +125,21 @@ export class PlinkoPayoutService {
                         payout: Number(betWin.toFixed(2)),
                         multiplier: Number(currentMultiplier.toFixed(2))
                     });
+                }
 
-                    if (betWin > 0) payoutPromises.push(this.creditPlayer(bet, betWin));
+                if (totalPayout > 0 && userBets.length > 0) {
+                    const aggregateBet = {
+                        ...userBets[0],
+                        amount: totalWager,
+                        transactionId: userBets.map((b: any) => b.transactionId).join(',')
+                    };
+                    payoutPromises.push(this.creditPlayer(aggregateBet, totalPayout, playerId, tenantId));
                 }
 
                 roundTotalBet += totalWager;
                 roundTotalWon += totalPayout;
+                roundTotalLost += Math.max(0, totalWager - totalPayout);
+                playerCount++;
 
                 if (totalPayout > 0) {
                     const leaderData = JSON.stringify({
@@ -175,29 +189,80 @@ export class PlinkoPayoutService {
 
         await Promise.allSettled(payoutPromises);
 
+        // Send end-round report to HQ (like Wheel of Fortune)
+        try {
+            const startSnapRaw = await this.redis.get(`plinko:${market}:${roundId}:start_snap`);
+            const startSnapshot = startSnapRaw ? JSON.parse(startSnapRaw) : null;
+
+            const opening: Record<string, number> = {};
+            const closing: Record<string, number> = {};
+            for (const r of results) {
+                opening[r.stockName] = r.startPrice;
+                closing[r.stockName] = r.endPrice;
+            }
+
+            this.http.endRound({
+                gameId: this.config.gamePublicId,
+                roundId,
+                market,
+                startTime: startSnapshot?.timestamp
+                    ? new Date(startSnapshot.timestamp).toISOString()
+                    : new Date(Date.now() - 60000).toISOString(),
+                endTime: new Date().toISOString(),
+                metadata: {
+                    opening,
+                    closing,
+                    results: results.map(r => ({
+                        stock: r.stockName,
+                        deltaPercent: r.deltaPercent,
+                        multiplier: r.multiplier,
+                        multiplierIndex: r.multiplierIndex,
+                    })),
+                    stats: {
+                        totalBet: Number(roundTotalBet.toFixed(2)),
+                        totalWin: Number(roundTotalWon.toFixed(2)),
+                        totalLost: Number(roundTotalLost.toFixed(2)),
+                        playerCount,
+                    },
+                },
+            }).catch(err => this.logger.error(`Failed to report round end: ${err.message}`));
+        } catch (err) {
+            this.logger.error(`Failed to build endRound payload: ${err.message}`);
+        }
+
         await this.redis.del(betsKey);
         await this.redis.del(`plinko:${market}:${roundId}:results`);
 
         this.logger.log(`Payouts completed for ${market}:${roundId}`);
     }
 
-    private async creditPlayer(bet: any, winAmount: number) {
+    private async creditPlayer(bet: any, winAmount: number, playerId: string, tenantId: string) {
+        const currency = typeof bet.currency === 'string' ? bet.currency : (bet.currency as any)?.name || 'USD';
+
+        // --- DEMO MODE ---
         try {
             const sessionKey = getKeyForPlayerSession(bet.sessionToken);
             const rawSession = await this.redis.get(sessionKey);
-            let isDemoMode = false;
 
             if (rawSession) {
                 const session = JSON.parse(rawSession);
-                isDemoMode = session.mode === 'demo';
 
-                if (isDemoMode) {
+                if (session.mode === 'demo') {
                     const currentBalance = parseFloat(session.currentBalance || '0');
                     const newBalance = currentBalance + winAmount;
                     session.currentBalance = String(newBalance);
                     session.updatedAt = new Date().toISOString();
                     await this.redis.set(sessionKey, JSON.stringify(session));
-                    // Return early to skip HQ
+
+                    // Emit updated balance to the player (demo)
+                    if (tenantId && playerId) {
+                        const room = this.balanceService.getPlayerBalanceRoom(tenantId, playerId);
+                        this.events.emitBalanceUpdateToPlayerRoom(room, {
+                            playerId,
+                            balance: newBalance,
+                            currency,
+                        });
+                    }
                     return;
                 }
             }
@@ -205,19 +270,28 @@ export class PlinkoPayoutService {
             // Ignore session read error, fallback to HQ
         }
 
+        // --- LIVE MODE ---
         try {
-            await this.http.creditWin({
+            const response = await this.http.creditWin({
                 sessionToken: bet.sessionToken,
                 winAmount: winAmount,
-                currency: typeof bet.currency === 'string' ? bet.currency : (bet.currency as any)?.name || 'USD',
+                currency,
                 transactionId: uuidv4(),
-                type: 'win',
-                playerId: bet.playerId,
-                tenantId: bet.tenantId,
+                type: 'credit',
                 metadata: { game: 'plinko', wagerTxId: bet.transactionId }
             });
+
+            // Emit authoritative balance update back to the player
+            if (response?.data?.newBalance !== undefined && tenantId && playerId) {
+                const room = this.balanceService.getPlayerBalanceRoom(tenantId, playerId);
+                this.events.emitBalanceUpdateToPlayerRoom(room, {
+                    playerId,
+                    balance: response.data.newBalance,
+                    currency,
+                });
+            }
         } catch (e) {
-            this.logger.error(`Failed to credit ${bet.playerId}: ${e.message}`);
+            this.logger.error(`Failed to credit ${playerId}: ${e.message}`);
         }
     }
 }

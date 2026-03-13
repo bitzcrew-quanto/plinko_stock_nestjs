@@ -5,11 +5,16 @@ import type { ConfigType } from '@nestjs/config';
 import { EventsGateway } from 'src/events/events.gateway';
 import { DeltaWorkerService } from 'src/workers/delta.service';
 import { BalanceUpdateService } from './balance-update.service';
-import type { Market, MarketDataPayload } from './dto/market-data.dto';
-import { getKeyForLastMarketSnapshot, getKeyForGameValidStocks, getGameRefetchChannel } from './redis.keys';
+import type { MarketDataPayload } from './dto/market-data.dto';
+import { getKeyForLastMarketSnapshot, getKeyForGameValidStocks, getGameRefetchChannel, getPlinkoStateKey, getGameConfigKey } from './redis.keys';
+import { HttpService } from '../http/http.service';
 
 export type UniversalRedisClient = RedisClientType | RedisClusterType;
 type RedisConfig = ConfigType<typeof appConfig>['pubsubRedis'];
+export interface GameConfig {
+  maxBetLimit?: number;
+  [key: string]: any;
+}
 
 @Injectable()
 export class RedisService implements OnModuleDestroy, OnModuleInit {
@@ -17,6 +22,7 @@ export class RedisService implements OnModuleDestroy, OnModuleInit {
   private subscriber!: UniversalRedisClient;
   private client!: UniversalRedisClient;
   private stateSubscriber!: UniversalRedisClient;
+  public gameConfig: GameConfig | null = null;
 
   private readonly lastPayloadByMarket: Record<string, MarketDataPayload> = Object.create(null);
   private readonly validStocksByMarket: Record<string, Set<string>> = {};
@@ -30,6 +36,7 @@ export class RedisService implements OnModuleDestroy, OnModuleInit {
     @Inject(appConfig.KEY) private readonly config: ConfigType<typeof appConfig>,
     @Inject(forwardRef(() => EventsGateway)) private eventsGateway: EventsGateway,
     private readonly deltaWorker: DeltaWorkerService,
+    private readonly httpService: HttpService,
     @Inject(forwardRef(() => BalanceUpdateService)) private balanceUpdateService: BalanceUpdateService,
   ) { }
 
@@ -304,43 +311,58 @@ export class RedisService implements OnModuleDestroy, OnModuleInit {
     for (const channel of channels) {
       this.validStocksByMarket[channel] = new Set<string>();
       const cacheKey = getKeyForGameValidStocks(this.config.gamePublicId, channel);
+      const configKey = getGameConfigKey(this.config.gamePublicId);
 
       try {
         let cached: string | null = null;
+        let cachedConfig: string | null = null;
         try {
-          cached = await (this.client).get(cacheKey);
+          [cached, cachedConfig] = await Promise.all([
+            (this.client).get(cacheKey),
+            (this.client).get(configKey)
+          ]);
         } catch (err) {
           this.logger.warn(`Failed to read stock cache for market '${channel}': ${err}`);
         }
 
-        if (cached) {
+        if (cached && cachedConfig) {
           try {
             const cachedSymbols = JSON.parse(cached);
             if (Array.isArray(cachedSymbols)) {
               this.validStocksByMarket[channel] = new Set(cachedSymbols);
-              this.logger.log(`Loaded ${cachedSymbols.length} valid stocks for market '${channel}' from Redis Cache`);
-              continue;
+              try {
+                this.gameConfig = JSON.parse(cachedConfig);
+                this.logger.log(`[fetchValidStocks] Redis Cache HIT for game config on '${channel} and config '${cachedConfig}'`);
+
+                if (this.gameConfig) {
+                  this.logger.log(`[fetchValidStocks] Bypassing HQ fetch for '${channel}' as cache data is valid.`);
+                  continue; // Skip HQ fetch
+                }
+              } catch (e) {
+                this.logger.warn(`Failed to parse game config from cache for ${channel}`);
+              }
             }
           } catch (e) {
             this.logger.warn(`Invalid cached data for ${channel}, falling back to HQ`);
           }
+        } else {
+          this.logger.log(`[fetchValidStocks] Redis Cache MISS for valid stocks or config on '${channel}'.`);
         }
 
-        const url = `${this.config.hqServiceUrl}/api/stocks?market=${channel}&gameId=${this.config.gamePublicId}&limit=55`;
-        this.logger.log(`Fetching stocks for market '${channel}' from ${url}`);
-
-        const response = await fetch(url);
-        if (!response.ok) {
-          this.logger.warn(`Failed to fetch stocks for market '${channel}': ${response.statusText}`);
-          continue;
+        let json;
+        try {
+          // url =const url = `${this.config.hqServiceUrl}/api/stocks?market=${channel}&gameId=${this.config.gamePublicId}&limit=40`; fir bhi check
+          json = await this.httpService.fetchGameConfig(channel);
+        } catch (error) {
+          this.logger.error(`Failed to fetch game config for market '${channel}': ${error}`);
         }
 
-        const json = await response.json();
         this.logger.debug(`HQ Response for ${channel}: ${JSON.stringify(json)}`);
 
-        if (json.success && Array.isArray(json.data)) {
+        if (json.success && json.data) {
+          const stocksList = Array.isArray(json.data.stocks) ? json.data.stocks : [];
           const symbolsSet = new Set<string>();
-          for (const stock of json.data) {
+          for (const stock of stocksList) {
             if (stock.symbol) symbolsSet.add(stock.symbol);
           }
 
@@ -350,8 +372,15 @@ export class RedisService implements OnModuleDestroy, OnModuleInit {
           try {
             const uniqueSymbols = Array.from(symbolsSet);
             await (this.client).set(cacheKey, JSON.stringify(uniqueSymbols), { EX: 600 });
+            // Optionally cache the game config
+            if (json.data.config) {
+              this.gameConfig = json.data.config;
+              const configKey = getGameConfigKey(this.config.gamePublicId);
+              await (this.client).set(configKey, JSON.stringify(json.data.config), { EX: 600 });
+              this.logger.log(`Loaded game config for ${channel} from HQ: ${JSON.stringify(json.data.config)}`);
+            }
           } catch (err) {
-            this.logger.warn(`Failed to cache stocks for ${channel}: ${err}`);
+            this.logger.warn(`Failed to cache data for ${channel}: ${err}`);
           }
 
         } else {
@@ -372,11 +401,31 @@ export class RedisService implements OnModuleDestroy, OnModuleInit {
 
       await (this.subscriber as any).subscribe(
         channels,
-        (message: string, channel: string) => {
+        async (message: string, channel: string) => {
           try {
             const parsed = JSON.parse(message);
             const room = channel;
-            const previous = this.lastPayloadByMarket[room];
+
+            const stateKey = getPlinkoStateKey(room);
+            const rawState = await this.client.get(stateKey);
+
+            if (rawState) {
+              const state = JSON.parse(rawState);
+              if (state.phase === 'DROPPING' || state.phase === 'PAYOUT') {
+                return;
+              }
+            }
+
+            let previous = this.lastPayloadByMarket[room];
+            if (rawState) {
+              const state = JSON.parse(rawState);
+              if (state.roundId) {
+                const baseSnapRaw = await this.client.get(`plinko:${room}:${state.roundId}:base_snap`);
+                if (baseSnapRaw) {
+                  previous = JSON.parse(baseSnapRaw) as MarketDataPayload;
+                }
+              }
+            }
 
             // Filter symbols based on valid stocks for this market
             let currentPayload = parsed;
@@ -412,6 +461,8 @@ export class RedisService implements OnModuleDestroy, OnModuleInit {
 
                 outbound = this.applyForcedDeltas(outbound);
 
+                (outbound as any).receivedAt = Date.now();
+
                 this.lastPayloadByMarket[room] = outbound;
                 const lastKey = getKeyForLastMarketSnapshot(room);
                 (this.client).set(lastKey, JSON.stringify(outbound), { EX: 30 }).catch(() => undefined);
@@ -422,6 +473,8 @@ export class RedisService implements OnModuleDestroy, OnModuleInit {
 
                 // Apply any forced deltas here too
                 outbound = this.applyForcedDeltas(outbound);
+
+                (outbound as any).receivedAt = Date.now();
 
                 this.lastPayloadByMarket[room] = outbound;
                 const lastKey = getKeyForLastMarketSnapshot(room);
@@ -505,7 +558,8 @@ export class RedisService implements OnModuleDestroy, OnModuleInit {
               const key = getKeyForGameValidStocks(this.config.gamePublicId, market);
               await (this.client).del(key);
             }
-
+            const configKey = getGameConfigKey(this.config.gamePublicId);
+            await (this.client).del(configKey);
             await this.fetchValidStocks();
           } catch (e) {
             this.logger.error(`Error processing ${channel} message`, e);
@@ -577,7 +631,11 @@ export class RedisService implements OnModuleDestroy, OnModuleInit {
           : nowSec;
 
         const rawDelta = previousPrice !== null ? price - previousPrice : 0;
-        let delta = Number(rawDelta.toFixed(2));
+        let delta = 0;
+
+        if (previousPrice && previousPrice > 0) {
+          delta = Number(((rawDelta / previousPrice) * 100).toFixed(2));
+        }
 
         if (delta === 0 && rawDelta !== 0) {
           delta = rawDelta > 0 ? 0.01 : -0.01;
