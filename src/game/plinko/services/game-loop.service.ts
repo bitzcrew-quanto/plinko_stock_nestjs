@@ -428,7 +428,7 @@ export class PlinkoGameLoopService implements OnModuleInit, OnModuleDestroy {
             try {
                 let userBets: any[] = [];
                 try {
-                    const parsed = JSON.parse(betJson);
+                    const parsed = JSON.parse(betJson as string);
                     userBets = Array.isArray(parsed) ? parsed : [parsed];
                 } catch {
                     this.logger.error(`Failed to parse bet JSON for player ${playerId}: ${betJson}`);

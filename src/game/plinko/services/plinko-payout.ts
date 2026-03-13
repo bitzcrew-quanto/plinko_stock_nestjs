@@ -90,7 +90,7 @@ export class PlinkoPayoutService {
 
         for (const [playerId, betsJson] of Object.entries(allBetsMap)) {
             try {
-                let userBets = JSON.parse(betsJson);
+                let userBets = JSON.parse(betsJson as string);
                 if (!Array.isArray(userBets)) userBets = [userBets];
 
                 let totalWager = 0;
