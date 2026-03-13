@@ -56,15 +56,21 @@ export class PlinkoPriceService {
 
   /**
    * Helper to validate if a snapshot is "fresh" enough for the game.
-   * If data is stale (e.g., ingestion service died), we might want to pause the game.
+
    */
-  isSnapshotFresh(snapshot: MarketDataPayload, maxAgeSeconds: number = 10): boolean {
-    if (!snapshot || !snapshot.timestamp) return false;
+  isSnapshotFresh(snapshot: MarketDataPayload, maxAgeSeconds: number = 5): boolean {
+    if (!snapshot) return false;
 
+    const receivedAt: number | undefined = (snapshot as any).receivedAt;
+    if (receivedAt && Number.isFinite(receivedAt)) {
+      const ageMs = Date.now() - receivedAt;
+      return ageMs <= maxAgeSeconds * 1000;
+    }
+
+    // Fallback: use the upstream data timestamp (e.g. Redis-fetched snapshot)
+    if (!snapshot.timestamp) return false;
     const snapshotTime = new Date(snapshot.timestamp).getTime();
-    const now = Date.now();
-    const ageSeconds = (now - snapshotTime) / 1000;
-
+    const ageSeconds = (Date.now() - snapshotTime) / 1000;
     return ageSeconds <= maxAgeSeconds;
   }
 }

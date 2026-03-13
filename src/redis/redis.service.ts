@@ -461,6 +461,8 @@ export class RedisService implements OnModuleDestroy, OnModuleInit {
 
                 outbound = this.applyForcedDeltas(outbound);
 
+                (outbound as any).receivedAt = Date.now();
+
                 this.lastPayloadByMarket[room] = outbound;
                 const lastKey = getKeyForLastMarketSnapshot(room);
                 (this.client).set(lastKey, JSON.stringify(outbound), { EX: 30 }).catch(() => undefined);
@@ -471,6 +473,8 @@ export class RedisService implements OnModuleDestroy, OnModuleInit {
 
                 // Apply any forced deltas here too
                 outbound = this.applyForcedDeltas(outbound);
+
+                (outbound as any).receivedAt = Date.now();
 
                 this.lastPayloadByMarket[room] = outbound;
                 const lastKey = getKeyForLastMarketSnapshot(room);
